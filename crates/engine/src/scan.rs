@@ -169,6 +169,28 @@ pub fn scan(ctx: &ScanContext<'_>, index: &mut Index, subtree: &str) -> Result<S
     };
     index.batch(|index| {
         let mut stats = ScanStats::default();
+        // A subtree scan may be the first sign of new parent directories.
+        let mut ancestors = Vec::new();
+        let mut cur = subtree;
+        while let Some(parent) = bsync_core::parent_of(cur) {
+            ancestors.push(parent);
+            cur = parent;
+        }
+        for dir in ancestors.into_iter().rev() {
+            match ctx.fs.metadata(&rel_to_path(ctx.root, dir)) {
+                Ok(metadata) if metadata.kind == FileKind::Dir => {
+                    let entry = WalkEntry {
+                        path: dir.to_owned(),
+                        metadata,
+                    };
+                    let existing = index.get(dir)?;
+                    if update_entry(ctx, index, &entry, existing.as_ref(), &mut stats)? {
+                        stats.changed.push(dir.to_owned());
+                    }
+                }
+                _ => break,
+            }
+        }
         let mut seen = BTreeSet::new();
         for entry in &walked.entries {
             seen.insert(entry.path.as_str());
@@ -342,6 +364,17 @@ mod tests {
         let stats = scan(&ctx(root, &no_skip), &mut index, "d").unwrap();
         assert_eq!(stats.changed, vec!["d", "d/x"]);
         assert!(!index.get("keep").unwrap().unwrap().record.deleted);
+    }
+
+    #[test]
+    fn subtree_scan_records_new_ancestors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let mut index = Index::open_in_memory().unwrap();
+        std::fs::create_dir_all(root.join("p/q")).unwrap();
+        write(root, "p/q/f", b"f");
+        let stats = scan(&ctx(root, &no_skip), &mut index, "p/q/f").unwrap();
+        assert_eq!(stats.changed, vec!["p", "p/q", "p/q/f"]);
     }
 
     #[test]

@@ -23,6 +23,9 @@ serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 blake3 = "1"
 fastcdc = "5"
+notify = "8"
+notify-debouncer-full = "0.7"
+tracing = "0.1"
 rusqlite = { version = "0.41", features = ["bundled"] }
 anyhow = "1"
 tempfile = "3"

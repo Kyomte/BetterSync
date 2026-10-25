@@ -134,7 +134,7 @@ Legend: 🐧 = fully verifiable on Linux / in a cloud session. 💻 = needs a ma
 
 **Done when:** tests cover: scan of a fixture tree; editing the middle of a 10 MB file changes only a few chunks; rescan without changes does no hashing.
 
-### M2 — Watcher + debouncing 🐧/💻
+### M2 — Watcher + debouncing 🐧/💻 ✅
 - `notify` + `notify-debouncer-full`; events trigger targeted rescans of affected paths.
 - Periodic full rescan fallback (default 1 h) for missed events.
 

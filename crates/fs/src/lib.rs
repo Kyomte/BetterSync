@@ -14,8 +14,10 @@ use std::path::Path;
 use std::time::SystemTime;
 
 mod walk;
+mod watch;
 
 pub use walk::{WalkEntry, WalkResult, is_internal, rel_to_path, walk};
+pub use watch::{FolderWatcher, WatchConfig, WatchEvent, relative_paths};
 
 /// BetterSync's own directory at the root of every synced folder.
 pub const BSYNC_DIR: &str = ".bsync";

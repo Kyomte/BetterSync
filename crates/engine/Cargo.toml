@@ -14,6 +14,7 @@ bsync-fs.workspace = true
 bsync-proto.workspace = true
 bsync-net.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
