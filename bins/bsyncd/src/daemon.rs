@@ -424,6 +424,8 @@ impl EngineThread {
                 addr: SocketAddr::from(([0, 0, 0, 0], 0)),
             });
         }
+        // Work found by the startup scans (no event may come for a while).
+        self.tick_all();
         loop {
             let deadline = self
                 .folders
@@ -460,13 +462,17 @@ impl EngineThread {
                     Event::Control(c) => self.on_control(c, &paired, &folders_cfg, watch),
                 }
             }
-            for f in &mut self.folders {
-                if let Some(e) = f.engine.as_mut()
-                    && let Err(err) = e.tick()
-                {
-                    tracing::error!(folder = %f.config.id, "sync error: {err}");
-                    f.error = Some(err.to_string());
-                }
+            self.tick_all();
+        }
+    }
+
+    fn tick_all(&mut self) {
+        for f in &mut self.folders {
+            if let Some(e) = f.engine.as_mut()
+                && let Err(err) = e.tick()
+            {
+                tracing::error!(folder = %f.config.id, "sync error: {err}");
+                f.error = Some(err.to_string());
             }
         }
     }

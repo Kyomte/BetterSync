@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BetterSync</title>
+<style>
+  :root { --bg:#fff; --fg:#1f2328; --muted:#656d76; --line:#d0d7de; --ok:#1a7f37; --warn:#9a6700; --bad:#cf222e; --accent:#0969da; --card:#f6f8fa; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0d1117; --fg:#e6edf3; --muted:#8d96a0; --line:#30363d; --ok:#3fb950; --warn:#d29922; --bad:#f85149; --accent:#4493f8; --card:#161b22; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 16px; margin: 28px 0 8px; }
+  .muted { color: var(--muted); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; margin: 8px 0; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .grow { flex:1; min-width: 0; overflow-wrap:anywhere; }
+  code { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap:anywhere; }
+  .pill { font-size: 12px; padding: 1px 8px; border-radius: 99px; border:1px solid currentColor; }
+  .idle, .connected { color: var(--ok); } .syncing { color: var(--accent); } .paused, .offline { color: var(--muted); } .error { color: var(--bad); }
+  .warn { color: var(--warn); }
+  button { font: inherit; padding: 4px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  input { font: inherit; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); width: 100%; }
+  form .row > * { flex: 1 1 180px; }
+  ul { margin: 6px 0 0; padding-left: 20px; }
+  #msg { min-height: 1.4em; }
+</style>
+</head>
+<body>
+<main>
+  <h1>BetterSync</h1>
+  <div id="me" class="muted">Connecting to the daemon…</div>
+  <div id="msg" class="muted"></div>
+
+  <h2>Folders</h2>
+  <div id="folders"></div>
+
+  <h2>Devices</h2>
+  <div id="peers"></div>
+
+  <h2>Pair a device</h2>
+  <div class="card">
+    <p class="muted" style="margin-top:0">Pairing is mutual: enter the other device's ID here, and this device's ID there.</p>
+    <form id="pair">
+      <div class="row">
+        <input name="id" placeholder="Device ID (ABCD-EFGH-…)" required>
+        <input name="name" placeholder="Name (optional)">
+        <input name="addr" placeholder="Address, e.g. Tailscale 100.x.y.z:22027 (optional)">
+      </div>
+      <p><button class="primary" type="submit">Pair</button></p>
+    </form>
+  </div>
+
+  <h2>Add a folder</h2>
+  <div class="card">
+    <form id="folder">
+      <div class="row">
+        <input name="id" placeholder="Folder ID (same on every device)" required>
+        <input name="path" placeholder="Full path on this device" required>
+        <input name="share" placeholder="Share with device ID (optional)">
+      </div>
+      <p><button class="primary" type="submit">Add folder</button></p>
+    </form>
+  </div>
+</main>
+<script>
+"use strict";
+const token = new URLSearchParams(location.hash.slice(1)).get("token") || sessionStorage.getItem("bsync-token");
+if (token) { try { sessionStorage.setItem("bsync-token", token); } catch (_) {} history.replaceState(null, "", location.pathname); }
+
+const el = (tag, attrs = {}, ...kids) => {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) k === "class" ? (e.className = v) : e.setAttribute(k, v);
+  for (const k of kids) e.append(k);
+  return e;
+};
+const say = (text, cls = "muted") => { const m = document.getElementById("msg"); m.className = cls; m.textContent = text; };
+
+async function api(path, body) {
+  const r = await fetch(path, {
+    method: body === undefined ? "GET" : "POST",
+    headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.message || r.statusText);
+  return data;
+}
+
+function render(s) {
+  const me = document.getElementById("me");
+  me.replaceChildren("This device: ", el("strong", {}, s.device_name), " · ID ", el("code", {}, s.device_id), " ");
+  const copy = el("button", { type: "button" }, "Copy ID");
+  copy.onclick = () => navigator.clipboard.writeText(s.device_id).then(() => say("Device ID copied."));
+  me.append(copy);
+
+  const folders = document.getElementById("folders");
+  folders.replaceChildren();
+  if (!s.folders.length) folders.append(el("p", { class: "muted" }, "No folders yet."));
+  for (const f of s.folders) {
+    const action = el("button", { type: "button" }, f.state === "paused" ? "Resume" : "Pause");
+    action.onclick = () => api(`/api/folders/${encodeURIComponent(f.id)}/${f.state === "paused" ? "resume" : "pause"}`, {}).then(refresh, e => say(e.message, "error"));
+    const card = el("div", { class: "card" },
+      el("div", { class: "row" },
+        el("div", { class: "grow" }, el("strong", {}, f.id), " ", el("span", { class: "muted" }, el("code", {}, f.path))),
+        el("span", { class: "pill " + f.state }, f.state === "syncing" ? `syncing · ${f.pending} pending` : f.state),
+        action),
+      el("div", { class: "muted" }, `${f.local_entries} item(s) · shared with ${f.shared_with.length} device(s)`));
+    if (f.error) card.append(el("div", { class: "error" }, f.error));
+    if (f.blocked.length) {
+      const ul = el("ul");
+      for (const b of f.blocked) ul.append(el("li", {}, el("code", {}, b.path), " — ", b.reason));
+      card.append(el("div", { class: "warn" }, "Not synced:"), ul);
+    }
+    if (f.conflicts.length) {
+      const ul = el("ul");
+      for (const c of f.conflicts) ul.append(el("li", {}, el("code", {}, c)));
+      card.append(el("div", { class: "warn" }, `Conflict copies (${f.conflicts.length}) — both versions were kept; delete the one you don't need:`), ul);
+    }
+    folders.append(card);
+  }
+
+  const peers = document.getElementById("peers");
+  peers.replaceChildren();
+  if (!s.peers.length) peers.append(el("p", { class: "muted" }, "No paired devices yet."));
+  for (const p of s.peers) {
+    const forget = el("button", { type: "button" }, "Unpair");
+    forget.onclick = () => confirm(`Stop syncing with ${p.name || p.id}?`) && api("/api/unpair", { id: p.id }).then(refresh, e => say(e.message, "error"));
+    peers.append(el("div", { class: "card row" },
+      el("div", { class: "grow" }, el("strong", {}, p.name || "(unnamed)"), " ", el("code", { class: "muted" }, p.id)),
+      el("span", { class: "pill " + (p.connected ? "connected" : "offline") }, p.connected ? (p.address ? `connected · ${p.address}` : "connected") : "not connected"),
+      forget));
+  }
+}
+
+async function refresh() {
+  if (!token) { say("Open this page from the BetterSync tray menu (it carries the access token).", "error"); return; }
+  try { render(await api("/api/status")); } catch (e) { say("Cannot reach the daemon: " + e.message, "error"); }
+}
+
+document.getElementById("pair").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const f = new FormData(ev.target);
+  try {
+    const r = await api("/api/pair", { id: f.get("id").trim(), name: f.get("name").trim() || null, addresses: f.get("addr").trim() ? [f.get("addr").trim()] : [] });
+    say(r.message, "idle"); ev.target.reset(); refresh();
+  } catch (e) { say(e.message, "error"); }
+};
+document.getElementById("folder").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const f = new FormData(ev.target);
+  try {
+    const share = f.get("share").trim();
+    const r = await api("/api/folders", { id: f.get("id").trim(), path: f.get("path").trim(), devices: share ? [share] : [] });
+    say(r.message, "idle"); ev.target.reset(); refresh();
+  } catch (e) { say(e.message, "error"); }
+};
+
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>

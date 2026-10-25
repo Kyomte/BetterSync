@@ -390,6 +390,7 @@ fn router(state: ApiState) -> Router {
         .route("/api/folders/{id}/resume", post(resume))
         .route("/api/folders/{id}/rescan", post(rescan))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth))
+        .merge(crate::ui::router())
         .with_state(state)
 }
 

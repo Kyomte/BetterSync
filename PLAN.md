@@ -185,10 +185,11 @@ Legend: 🐧 = fully verifiable on Linux / in a cloud session. 💻 = needs a ma
 
 **Done when:** `bsync status` shows folders/peers/progress; e2e test drives two daemons purely through the CLI.
 
-### M10 — Tray / menu-bar app + autostart 💻
+### M10 — Tray / menu-bar app + autostart 💻 ✅ (code done; 💻 checklist pending)
 - `bsync-tray`: icon states (idle, syncing, error, paused), menu: open folder, pause, status window, quit.
 - Autostart: Windows HKCU Run value; macOS LaunchAgent plist. (Windows note: launch via `explorer.exe` when testing from a sandboxed shell, or the Run-key write may be virtualised.)
 - Status window with pairing flow and conflict list (small webview or native — decide in the milestone).
+  - **Decided:** a local web page served by the daemon at its control-API address and opened in the default browser (token in the URL fragment). No webview dependency, same page on every OS, and the API it uses is the one the CLI uses.
 
 **Done when:** 💻 manual checklist passes on both OSes; idle CPU ≈ 0 and memory recorded in README.
 

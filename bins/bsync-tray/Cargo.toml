@@ -9,6 +9,20 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ureq.workspace = true
+dirs.workspace = true
+
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+tray-icon = "0.24"
+tao = "0.37"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56"
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

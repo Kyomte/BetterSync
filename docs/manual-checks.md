@@ -12,3 +12,9 @@ with date, OS version and result. CI only covers compile + automated tests.
 | M8 | Windows ↔ macOS: `Readme.md` vs `README.md` created on each side is refused and shown as blocked on both | not yet run | not yet run |
 | M8 | Windows ↔ macOS: a file named `café.txt` created on macOS (NFD) syncs as one file and edits flow both ways | not yet run | not yet run |
 | M8 | Windows: a file open in Word is retried after closing it (shown as blocked meanwhile) | not yet run | n/a |
+| M10 | Tray icon appears; colour follows state (green idle, blue syncing, grey paused, red needs attention, dark grey daemon not running) | not yet run | not yet run |
+| M10 | Menu: summary line, Open folder ▸ each folder, Pause/Resume syncing, Status and devices… opens the status page, Quit | not yet run | not yet run |
+| M10 | Tray starts `bsyncd` if it is not running | not yet run | not yet run |
+| M10 | "Start at login" toggles the HKCU Run value / LaunchAgent plist and survives a log-out/in (Windows: launch the tray via `explorer.exe` when testing from a sandboxed shell) | not yet run | not yet run |
+| M10 | Status page: pair a device, add a folder, pause/resume, conflict list | not yet run | not yet run |
+| M10 | Idle CPU ≈ 0 and memory of `bsyncd` + `bsync-tray` (record below) | not yet run | not yet run |
