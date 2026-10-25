@@ -121,6 +121,7 @@ pub struct Daemon {
     device_id: DeviceId,
     local_addr: SocketAddr,
     config_dir: PathBuf,
+    api_addr: SocketAddr,
     _discovery: Option<Discovery>,
 }
 
@@ -212,6 +213,14 @@ impl Daemon {
             None
         };
 
+        let api_listen: SocketAddr = config
+            .api_listen
+            .parse()
+            .with_context(|| format!("bad api_listen address {:?}", config.api_listen))?;
+        let api_addr =
+            runtime.block_on(crate::api::serve(api_listen, events_tx.clone(), config_dir))?;
+        tracing::info!(%api_addr, "control API listening");
+
         let mut thread_state = EngineThread {
             config_dir: config_dir.to_path_buf(),
             config: config.clone(),
@@ -235,6 +244,7 @@ impl Daemon {
             device_id: me,
             local_addr,
             config_dir: config_dir.to_path_buf(),
+            api_addr,
             _discovery: discovery,
         })
     }
@@ -245,6 +255,11 @@ impl Daemon {
 
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    /// Where the local control API listens.
+    pub fn api_addr(&self) -> SocketAddr {
+        self.api_addr
     }
 
     pub fn config_dir(&self) -> &Path {
@@ -562,7 +577,7 @@ impl EngineThread {
                         d.name.clone()
                     },
                     connected: self.net.is_connected(&id),
-                    address: seen.map(|s| s.1),
+                    address: self.net.remote_address(&id),
                 })
             })
             .collect();

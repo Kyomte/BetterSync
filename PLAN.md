@@ -178,7 +178,7 @@ Legend: 🐧 = fully verifiable on Linux / in a cloud session. 💻 = needs a ma
 
 **Done when:** tests for each rule; 💻 Windows ↔ macOS case/Unicode collision manual check.
 
-### M9 — Daemon, CLI, control API 🐧
+### M9 — Daemon, CLI, control API 🐧 ✅
 - `bsyncd`: runs folders, exposes localhost HTTP JSON API (random token in config dir) — status, folders, peers, conflicts, pause/resume.
 - `bsync` CLI over that API.
 - Structured logging (`tracing`) to a rolling file.

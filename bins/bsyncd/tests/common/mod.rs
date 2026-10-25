@@ -25,6 +25,7 @@ impl Dev {
         let c = Config {
             device_name: name.into(),
             listen: "127.0.0.1:0".into(),
+            api_listen: "127.0.0.1:0".into(),
             ..Config::default()
         };
         c.save(&d.config_dir()).unwrap();

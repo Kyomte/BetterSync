@@ -15,6 +15,7 @@ use bsync_core::{DeviceId, FolderId};
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_PORT: u16 = 22027;
+pub const DEFAULT_API_PORT: u16 = 22028;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceConfig {
@@ -67,6 +68,14 @@ pub struct Config {
     /// Announce and find devices on the local network via mDNS.
     #[serde(default = "yes")]
     pub local_discovery: bool,
+    /// Loopback address of the local control API (port 0 picks one; the
+    /// bound address is written to `api.addr`).
+    #[serde(default = "default_api")]
+    pub api_listen: String,
+}
+
+fn default_api() -> String {
+    format!("127.0.0.1:{DEFAULT_API_PORT}")
 }
 
 fn yes() -> bool {
@@ -81,6 +90,7 @@ impl Default for Config {
             devices: Vec::new(),
             folders: Vec::new(),
             local_discovery: true,
+            api_listen: default_api(),
         }
     }
 }

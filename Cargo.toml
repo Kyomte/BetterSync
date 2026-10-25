@@ -37,6 +37,9 @@ unicode-normalization = "0.1"
 ignore = "0.4"
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json"] }
+ureq = { version = "3", default-features = false, features = ["json"] }
+tracing-appender = "0.2"
 dirs = "6"
 bsyncd = { path = "bins/bsyncd" }
 rusqlite = { version = "0.41", features = ["bundled"] }

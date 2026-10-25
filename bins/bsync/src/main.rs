@@ -1,11 +1,19 @@
 //! BetterSync command-line client.
+//!
+//! Talks to the running daemon through its local control API. A few setup
+//! commands (`init`, `id`, and `pair`/`folder` while the daemon is not
+//! running) edit the configuration directly.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use bsync_core::DeviceId;
 use bsyncd::Config;
+use bsyncd::api::{DeviceRequest, FolderRequest, OkDto, PairRequest, StatusDto};
 use clap::{Parser, Subcommand};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 #[derive(Parser)]
 #[command(version, about = "BetterSync command-line client")]
@@ -27,9 +35,18 @@ enum Command {
         /// UDP address to listen on, e.g. 0.0.0.0:22027.
         #[arg(long)]
         listen: Option<String>,
+        /// Loopback address of the control API, e.g. 127.0.0.1:22028.
+        #[arg(long)]
+        api: Option<String>,
     },
     /// Print this device's ID.
     Id,
+    /// Show folders, devices and sync progress.
+    Status {
+        /// Print the raw JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Trust a device. Run it on both devices with each other's ID.
     Pair {
         device: String,
@@ -44,6 +61,14 @@ enum Command {
     /// Manage synced folders.
     #[command(subcommand)]
     Folder(FolderCommand),
+    /// Pause syncing a folder.
+    Pause { folder: String },
+    /// Resume syncing a folder.
+    Resume { folder: String },
+    /// Rescan a folder for changes now.
+    Rescan { folder: String },
+    /// List conflict copies.
+    Conflicts,
 }
 
 #[derive(Subcommand)]
@@ -62,20 +87,140 @@ enum FolderCommand {
     List,
 }
 
+/// Connection to the daemon's control API.
+struct Client {
+    base: String,
+    token: String,
+    agent: ureq::Agent,
+}
+
+impl Client {
+    /// `None` if the daemon is not running (no address file, or nothing
+    /// answers there).
+    fn connect(dir: &Path) -> Option<Self> {
+        let addr = std::fs::read_to_string(bsyncd::api::addr_path(dir)).ok()?;
+        let token = std::fs::read_to_string(bsyncd::api::token_path(dir)).ok()?;
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(Duration::from_secs(60)))
+            .build()
+            .into();
+        let client = Self {
+            base: format!("http://{}", addr.trim()),
+            token: token.trim().to_owned(),
+            agent,
+        };
+        client.status().ok().map(|_| client)
+    }
+
+    fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        let resp = self
+            .agent
+            .get(format!("{}{path}", self.base))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .call()?;
+        Self::read(resp)
+    }
+
+    fn post<T: DeserializeOwned>(&self, path: &str, body: &impl Serialize) -> Result<T> {
+        let resp = self
+            .agent
+            .post(format!("{}{path}", self.base))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .send_json(body)?;
+        Self::read(resp)
+    }
+
+    fn read<T: DeserializeOwned>(mut resp: ureq::http::Response<ureq::Body>) -> Result<T> {
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let msg = resp
+                .body_mut()
+                .read_json::<OkDto>()
+                .map(|e| e.message)
+                .unwrap_or_else(|_| status.to_string());
+            bail!("{msg}");
+        }
+        Ok(resp.body_mut().read_json()?)
+    }
+
+    fn status(&self) -> Result<StatusDto> {
+        self.get("/api/status")
+    }
+
+    fn act(&self, path: &str, body: &impl Serialize) -> Result<()> {
+        let r: OkDto = self.post(path, body)?;
+        println!("{}", r.message);
+        Ok(())
+    }
+}
+
 fn parse_device(s: &str) -> Result<DeviceId> {
     s.parse()
         .with_context(|| format!("{s:?} is not a device ID"))
 }
 
-fn identity_id(dir: &std::path::Path) -> Result<DeviceId> {
-    bsyncd::config::device_id(dir)
+fn daemon(dir: &Path) -> Result<Client> {
+    Client::connect(dir).context("the BetterSync daemon (bsyncd) is not running")
+}
+
+fn print_status(s: &StatusDto) {
+    println!("This device: {} ({})", s.device_id, s.device_name);
+    if let Some(l) = &s.listen {
+        println!("Listening on {l}");
+    }
+    println!();
+    if s.folders.is_empty() {
+        println!("No folders. Add one with `bsync folder add <id> <path> --share <device>`.");
+    }
+    for f in &s.folders {
+        let progress = match f.state.as_str() {
+            "syncing" => format!(
+                "syncing: {} item(s) pending, {} transfer(s)",
+                f.pending, f.transfers
+            ),
+            "error" => format!("error: {}", f.error.clone().unwrap_or_default()),
+            other => other.to_owned(),
+        };
+        println!("Folder {}  {}", f.id, f.path);
+        println!(
+            "  {progress}; {} item(s), shared with {} device(s)",
+            f.local_entries,
+            f.shared_with.len()
+        );
+        for b in &f.blocked {
+            println!("  ! {}: {}", b.path, b.reason);
+        }
+        if !f.conflicts.is_empty() {
+            println!(
+                "  {} conflict copy(ies), see `bsync conflicts`",
+                f.conflicts.len()
+            );
+        }
+    }
+    println!();
+    if s.peers.is_empty() {
+        println!("No paired devices. Pair with `bsync pair <device-id>` on both devices.");
+    }
+    for p in &s.peers {
+        let name = if p.name.is_empty() {
+            "(unnamed)"
+        } else {
+            &p.name
+        };
+        match (p.connected, &p.address) {
+            (true, Some(a)) => println!("Device {name}  {}  connected via {a}", p.id),
+            (true, None) => println!("Device {name}  {}  connected", p.id),
+            (false, _) => println!("Device {name}  {}  not connected", p.id),
+        }
+    }
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let dir = cli.config_dir.unwrap_or_else(bsyncd::default_config_dir);
     match cli.command {
-        Command::Init { name, listen } => {
+        Command::Init { name, listen, api } => {
             let mut c = Config::load_or_default(&dir)?;
             if let Some(n) = name {
                 c.device_name = n;
@@ -83,27 +228,55 @@ fn main() -> Result<()> {
             if let Some(l) = listen {
                 c.listen = l;
             }
+            if let Some(a) = api {
+                c.api_listen = a;
+            }
             c.save(&dir)?;
-            println!("{}", identity_id(&dir)?);
+            println!("{}", bsyncd::config::device_id(&dir)?);
         }
-        Command::Id => println!("{}", identity_id(&dir)?),
+        Command::Id => println!("{}", bsyncd::config::device_id(&dir)?),
+        Command::Status { json } => {
+            let s = daemon(&dir)?.status()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&s)?);
+            } else {
+                print_status(&s);
+            }
+        }
         Command::Pair {
             device,
             name,
             addresses,
         } => {
             let id = parse_device(&device)?;
-            let mut c = Config::load_or_default(&dir)?;
-            c.pair(id, name, addresses);
-            c.save(&dir)?;
-            println!("paired with {id}");
+            match Client::connect(&dir) {
+                Some(c) => c.act(
+                    "/api/pair",
+                    &PairRequest {
+                        id: id.to_string(),
+                        name,
+                        addresses,
+                    },
+                )?,
+                None => {
+                    let mut c = Config::load_or_default(&dir)?;
+                    c.pair(id, name, addresses);
+                    c.save(&dir)?;
+                    println!("paired with {id} (takes effect when bsyncd starts)");
+                }
+            }
         }
         Command::Unpair { device } => {
             let id = parse_device(&device)?;
-            let mut c = Config::load(&dir)?;
-            c.unpair(&id);
-            c.save(&dir)?;
-            println!("unpaired {id}");
+            match Client::connect(&dir) {
+                Some(c) => c.act("/api/unpair", &DeviceRequest { id: id.to_string() })?,
+                None => {
+                    let mut c = Config::load(&dir)?;
+                    c.unpair(&id);
+                    c.save(&dir)?;
+                    println!("unpaired {id}");
+                }
+            }
         }
         Command::Folder(FolderCommand::Add { id, path, share }) => {
             let devices = share
@@ -111,16 +284,39 @@ fn main() -> Result<()> {
                 .map(|s| parse_device(s))
                 .collect::<Result<Vec<_>>>()?;
             let path = std::path::absolute(&path)?;
-            let mut c = Config::load_or_default(&dir)?;
-            c.add_folder(&id, path, &devices)?;
-            c.save(&dir)?;
-            println!("added folder {id}");
+            match Client::connect(&dir) {
+                Some(c) => c.act(
+                    "/api/folders",
+                    &FolderRequest {
+                        id,
+                        path: path.display().to_string(),
+                        devices: devices.iter().map(ToString::to_string).collect(),
+                    },
+                )?,
+                None => {
+                    let mut c = Config::load_or_default(&dir)?;
+                    c.add_folder(&id, path, &devices)?;
+                    c.save(&dir)?;
+                    println!("added folder {id}");
+                }
+            }
         }
         Command::Folder(FolderCommand::Share { id, device }) => {
-            let mut c = Config::load(&dir)?;
-            c.share_folder(&id, parse_device(&device)?)?;
-            c.save(&dir)?;
-            println!("shared {id} with {device}");
+            let device = parse_device(&device)?;
+            match Client::connect(&dir) {
+                Some(c) => c.act(
+                    &format!("/api/folders/{id}/share"),
+                    &DeviceRequest {
+                        id: device.to_string(),
+                    },
+                )?,
+                None => {
+                    let mut c = Config::load(&dir)?;
+                    c.share_folder(&id, device)?;
+                    c.save(&dir)?;
+                    println!("shared {id} with {device}");
+                }
+            }
         }
         Command::Folder(FolderCommand::List) => {
             for f in Config::load(&dir)?.folders {
@@ -130,6 +326,28 @@ fn main() -> Result<()> {
                     f.path.display(),
                     f.devices.len()
                 );
+            }
+        }
+        Command::Pause { folder } => {
+            daemon(&dir)?.act(&format!("/api/folders/{folder}/pause"), &())?;
+        }
+        Command::Resume { folder } => {
+            daemon(&dir)?.act(&format!("/api/folders/{folder}/resume"), &())?;
+        }
+        Command::Rescan { folder } => {
+            daemon(&dir)?.act(&format!("/api/folders/{folder}/rescan"), &())?;
+        }
+        Command::Conflicts => {
+            let s = daemon(&dir)?.status()?;
+            let mut any = false;
+            for f in &s.folders {
+                for c in &f.conflicts {
+                    any = true;
+                    println!("{}\t{}", f.id, Path::new(&f.path).join(c).display());
+                }
+            }
+            if !any {
+                println!("No conflicts.");
             }
         }
     }
