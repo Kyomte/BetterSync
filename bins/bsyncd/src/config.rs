@@ -72,6 +72,59 @@ pub struct Config {
     /// bound address is written to `api.addr`).
     #[serde(default = "default_api")]
     pub api_listen: String,
+    #[serde(default)]
+    pub bandwidth: Bandwidth,
+}
+
+/// Whether to treat the network as metered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MeteredMode {
+    /// Ask the OS (Windows network cost, macOS expensive/Low Data Mode).
+    #[default]
+    Auto,
+    Yes,
+    No,
+}
+
+impl std::str::FromStr for MeteredMode {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "auto" => Ok(Self::Auto),
+            "yes" | "on" | "true" => Ok(Self::Yes),
+            "no" | "off" | "false" => Ok(Self::No),
+            _ => bail!("expected auto, yes or no"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Bandwidth {
+    pub metered: MeteredMode,
+    /// On a metered network, files above this size wait (0 = no limit).
+    pub large_file_mb: u64,
+    /// Upload / download limits in kB/s (0 = unlimited).
+    pub max_upload_kbps: u64,
+    pub max_download_kbps: u64,
+}
+
+impl Default for Bandwidth {
+    fn default() -> Self {
+        Self {
+            metered: MeteredMode::Auto,
+            large_file_mb: 50,
+            max_upload_kbps: 0,
+            max_download_kbps: 0,
+        }
+    }
+}
+
+impl Bandwidth {
+    pub fn large_file_bytes(&self) -> Option<u64> {
+        (self.large_file_mb > 0).then(|| self.large_file_mb * 1024 * 1024)
+    }
 }
 
 fn default_api() -> String {
@@ -91,6 +144,7 @@ impl Default for Config {
             folders: Vec::new(),
             local_discovery: true,
             api_listen: default_api(),
+            bandwidth: Bandwidth::default(),
         }
     }
 }

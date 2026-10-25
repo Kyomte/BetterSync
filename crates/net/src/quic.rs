@@ -16,7 +16,7 @@ use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use tokio::sync::mpsc;
 
 use crate::tls::{PairedSet, client_config, device_id_from_cert, server_config};
-use crate::{Identity, NetError, Transport};
+use crate::{Identity, NetError, RateLimit, Transport};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetEvent {
@@ -62,6 +62,8 @@ struct Inner {
     folders_for: FoldersFor,
     /// Signalled whenever a connection is added or removed.
     changed: Arc<tokio::sync::Notify>,
+    upload: Arc<RateLimit>,
+    download: Arc<RateLimit>,
 }
 
 /// A QUIC endpoint that both accepts and makes connections.
@@ -113,6 +115,8 @@ impl QuicNet {
                 name,
                 folders_for,
                 changed: Arc::new(tokio::sync::Notify::new()),
+                upload: Arc::new(RateLimit::default()),
+                download: Arc::new(RateLimit::default()),
             }),
         };
         let acceptor = net.clone();
@@ -142,6 +146,13 @@ impl QuicNet {
 
     pub fn connected_peers(&self) -> Vec<DeviceId> {
         self.conns().keys().copied().collect()
+    }
+
+    /// Limit total upload and download across all peers, in bytes per
+    /// second (0 = unlimited). Takes effect immediately.
+    pub fn set_rate_limits(&self, upload: u64, download: u64) {
+        self.inner.upload.set_rate(upload);
+        self.inner.download.set_rate(download);
     }
 
     /// Signalled whenever a connection is added or removed.
@@ -284,7 +295,7 @@ impl QuicNet {
         };
         let _ = tx.send(hello.encode());
 
-        let writer = tokio::spawn(write_loop(conn.clone(), rx));
+        let writer = tokio::spawn(write_loop(conn.clone(), rx, Arc::clone(&self.inner.upload)));
         let result = self.read_loop(&conn, peer).await;
         if let Err(e) = result {
             tracing::debug!("connection to {peer:?} ended: {e}");
@@ -320,6 +331,8 @@ impl QuicNet {
                 .await
                 .map_err(|e| NetError::Connect(e.to_string()))?;
             let len = frame_len(header).map_err(|e| NetError::Protocol(e.to_string()))?;
+            // Waiting here stops reading, so QUIC flow control slows the sender.
+            self.inner.download.acquire(4 + len).await;
             let mut body = vec![0u8; len];
             stream
                 .read_exact(&mut body)
@@ -357,7 +370,11 @@ impl QuicNet {
     }
 }
 
-async fn write_loop(conn: quinn::Connection, mut rx: mpsc::UnboundedReceiver<Vec<u8>>) {
+async fn write_loop(
+    conn: quinn::Connection,
+    mut rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    upload: Arc<RateLimit>,
+) {
     let Ok(mut stream) = conn.open_uni().await else {
         return;
     };
@@ -365,6 +382,7 @@ async fn write_loop(conn: quinn::Connection, mut rx: mpsc::UnboundedReceiver<Vec
         let mut frame = Vec::with_capacity(4 + body.len());
         frame.extend_from_slice(&(body.len() as u32).to_le_bytes());
         frame.extend_from_slice(&body);
+        upload.acquire(frame.len()).await;
         if stream.write_all(&frame).await.is_err() {
             return;
         }

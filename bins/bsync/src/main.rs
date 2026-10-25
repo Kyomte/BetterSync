@@ -10,7 +10,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use bsync_core::DeviceId;
 use bsyncd::Config;
-use bsyncd::api::{DeviceRequest, FolderRequest, OkDto, PairRequest, StatusDto};
+use bsyncd::api::{BandwidthRequest, DeviceRequest, FolderRequest, OkDto, PairRequest, StatusDto};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -69,6 +69,21 @@ enum Command {
     Rescan { folder: String },
     /// List conflict copies.
     Conflicts,
+    /// Show or change bandwidth settings.
+    Bandwidth {
+        /// Treat the network as metered: auto (ask the OS), yes or no.
+        #[arg(long)]
+        metered: Option<String>,
+        /// On metered networks, files larger than this many MB wait (0 = no limit).
+        #[arg(long)]
+        large_file_mb: Option<u64>,
+        /// Upload limit in kB/s (0 = unlimited).
+        #[arg(long)]
+        up: Option<u64>,
+        /// Download limit in kB/s (0 = unlimited).
+        #[arg(long)]
+        down: Option<u64>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -168,6 +183,9 @@ fn print_status(s: &StatusDto) {
     println!("This device: {} ({})", s.device_id, s.device_name);
     if let Some(l) = &s.listen {
         println!("Listening on {l}");
+    }
+    if s.metered {
+        println!("Network: metered (large files wait for an unmetered network)");
     }
     println!();
     if s.folders.is_empty() {
@@ -336,6 +354,34 @@ fn main() -> Result<()> {
         }
         Command::Rescan { folder } => {
             daemon(&dir)?.act(&format!("/api/folders/{folder}/rescan"), &())?;
+        }
+        Command::Bandwidth {
+            metered,
+            large_file_mb,
+            up,
+            down,
+        } => {
+            let req = BandwidthRequest {
+                metered,
+                large_file_mb,
+                max_upload_kbps: up,
+                max_download_kbps: down,
+            };
+            match Client::connect(&dir) {
+                Some(c) => c.act("/api/bandwidth", &req)?,
+                None => {
+                    let mut c = Config::load_or_default(&dir)?;
+                    let b = &mut c.bandwidth;
+                    if let Some(m) = &req.metered {
+                        b.metered = m.parse()?;
+                    }
+                    b.large_file_mb = req.large_file_mb.unwrap_or(b.large_file_mb);
+                    b.max_upload_kbps = req.max_upload_kbps.unwrap_or(b.max_upload_kbps);
+                    b.max_download_kbps = req.max_download_kbps.unwrap_or(b.max_download_kbps);
+                    println!("{:?}", c.bandwidth);
+                    c.save(&dir)?;
+                }
+            }
         }
         Command::Conflicts => {
             let s = daemon(&dir)?.status()?;

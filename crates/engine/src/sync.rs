@@ -35,6 +35,9 @@ pub struct EngineConfig {
     pub versions_max_age: Duration,
     /// ...or, oldest first, while they take more than this many bytes.
     pub versions_max_bytes: u64,
+    /// On a metered network, files larger than this are neither fetched
+    /// nor served (`None`: no limit).
+    pub metered_max_file: Option<u64>,
 }
 
 impl EngineConfig {
@@ -46,6 +49,7 @@ impl EngineConfig {
             request_timeout: Duration::from_secs(30),
             versions_max_age: Duration::from_secs(30 * 24 * 3600),
             versions_max_bytes: 10 * 1024 * 1024 * 1024,
+            metered_max_file: Some(50 * 1024 * 1024),
         }
     }
 }
@@ -122,7 +126,7 @@ pub struct SyncEngine {
     /// Peers that told us they lack a chunk.
     /// Peers that recently could not provide a chunk, until when to avoid
     /// asking them again.
-    lacking: BTreeMap<(DeviceId, Hash), SystemTime>,
+    lacking: BTreeMap<(DeviceId, Hash), (SystemTime, u32)>,
     /// Work is stalled (chunks nobody could provide, paths that failed);
     /// try again then.
     retry_at: Option<SystemTime>,
@@ -130,6 +134,8 @@ pub struct SyncEngine {
     /// locked by another program): failures so far, and when to retry.
     failing: BTreeMap<String, (u32, SystemTime)>,
     chunks_requested: u64,
+    /// The network is metered (mobile data, hotspot): hold back large files.
+    metered: bool,
     next_request: u64,
     /// Something happened that may let pending work proceed.
     dirty: bool,
@@ -175,6 +181,7 @@ impl SyncEngine {
             retry_at: None,
             failing: BTreeMap::new(),
             chunks_requested: 0,
+            metered: false,
             next_request: 1,
             dirty: true,
             paused: false,
@@ -216,6 +223,34 @@ impl SyncEngine {
         self.dirty = true;
     }
 
+    /// Tell the engine whether the current network is metered. Large files
+    /// wait for an unmetered network.
+    pub fn set_metered(&mut self, metered: bool) {
+        if self.metered != metered {
+            self.metered = metered;
+            // Held-back files may go now (or must stop being requested).
+            self.pending
+                .extend(self.folder.index().remote_paths().unwrap_or_default());
+            self.wanted.clear();
+            self.dirty = true;
+        }
+    }
+
+    /// Change the metered-network file size limit (`None`: no limit).
+    pub fn set_metered_max_file(&mut self, max: Option<u64>) {
+        self.config.metered_max_file = max;
+        self.dirty = true;
+    }
+
+    pub fn is_metered(&self) -> bool {
+        self.metered
+    }
+
+    /// Whether a file of `size` bytes must wait for an unmetered network.
+    fn held_back(&self, size: u64) -> bool {
+        self.metered && self.config.metered_max_file.is_some_and(|max| size > max)
+    }
+
     pub fn is_paused(&self) -> bool {
         self.paused
     }
@@ -248,9 +283,26 @@ impl SyncEngine {
             .min()
     }
 
+    /// `peer` said it lacks `hash` (or did not answer). Ask it again only
+    /// after a pause that doubles each time (30 s .. 1 h with the default
+    /// timeout), so a peer that refuses — e.g. on a metered network — is not
+    /// asked over and over.
     fn mark_lacking(&mut self, peer: DeviceId, hash: Hash) {
-        let until = self.clock.now() + self.config.request_timeout;
-        self.lacking.insert((peer, hash), until);
+        let strikes = self.lacking.get(&(peer, hash)).map_or(0, |l| l.1);
+        let wait = self
+            .config
+            .request_timeout
+            .saturating_mul(1 << strikes.min(7))
+            .min(Duration::from_secs(3600));
+        self.lacking
+            .insert((peer, hash), (self.clock.now() + wait, strikes + 1));
+    }
+
+    fn lacks(&self, peer: &DeviceId, hash: &Hash) -> bool {
+        let now = self.clock.now();
+        self.lacking
+            .get(&(*peer, *hash))
+            .is_some_and(|(until, _)| *until > now)
     }
 
     fn send(&self, to: DeviceId, msg: &Message) {
@@ -358,7 +410,19 @@ impl SyncEngine {
                 ..
             } => self.receive_index(peer, index_id, reset, records, last_seq)?,
             Message::RequestChunk { id, hash, .. } => {
-                let data = self.read_chunk(&hash)?;
+                // Uploading large files costs metered data too.
+                let locations = self.folder.index().find_chunk(&hash)?;
+                let large = self.metered
+                    && !locations.is_empty()
+                    && locations.iter().all(|loc| {
+                        self.folder
+                            .index()
+                            .get(&loc.path)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|e| self.held_back(e.record.size))
+                    });
+                let data = if large { None } else { self.read_chunk(&hash)? };
                 self.send(
                     peer,
                     &Message::ChunkData {
@@ -488,18 +552,31 @@ impl SyncEngine {
         Ok(())
     }
 
-    /// Which connected peer to ask for `hash`, needed by `path`.
-    fn pick_peer(&self, hash: &Hash, path: &str) -> Result<Option<DeviceId>> {
+    /// Which connected peer to ask for `hash`, needed by `path`. `holders`
+    /// caches, per path, which peer announced which chunks (decoding the
+    /// records once per call of [`Self::request_chunks`], not per chunk).
+    fn pick_peer(
+        &self,
+        hash: &Hash,
+        path: &str,
+        holders: &mut BTreeMap<String, Vec<(DeviceId, BTreeSet<Hash>)>>,
+    ) -> Result<Option<DeviceId>> {
         let load = |p: &DeviceId| self.in_flight.values().filter(|r| r.peer == *p).count();
-        let usable =
-            |p: &DeviceId| self.peers.contains_key(p) && !self.lacking.contains_key(&(*p, *hash));
-        let mut candidates: Vec<DeviceId> = self
-            .folder
-            .index()
-            .remote(path)?
-            .into_iter()
-            .filter(|(p, r)| usable(p) && r.chunks.iter().any(|c| c.hash == *hash))
-            .map(|(p, _)| p)
+        let usable = |p: &DeviceId| self.peers.contains_key(p) && !self.lacks(p, hash);
+        if !holders.contains_key(path) {
+            let list = self
+                .folder
+                .index()
+                .remote(path)?
+                .into_iter()
+                .map(|(p, r)| (p, r.chunks.iter().map(|c| c.hash).collect()))
+                .collect();
+            holders.insert(path.to_owned(), list);
+        }
+        let mut candidates: Vec<DeviceId> = holders[path]
+            .iter()
+            .filter(|(p, chunks)| usable(p) && chunks.contains(hash))
+            .map(|(p, _)| *p)
             .collect();
         if candidates.is_empty() {
             candidates = self.peers.keys().copied().filter(|p| usable(p)).collect();
@@ -509,6 +586,7 @@ impl SyncEngine {
 
     fn request_chunks(&mut self) {
         let mut unavailable = VecDeque::new();
+        let mut holders = BTreeMap::new();
         while self.in_flight.len() < self.config.max_in_flight {
             let Some((hash, path)) = self.wanted.pop_front() else {
                 break;
@@ -517,7 +595,7 @@ impl SyncEngine {
             if self.in_flight.values().any(|r| r.hash == hash) || self.cache().has(&hash) {
                 continue;
             }
-            let peer = match self.pick_peer(&hash, &path) {
+            let peer = match self.pick_peer(&hash, &path, &mut holders) {
                 Ok(Some(p)) => p,
                 Ok(None) => {
                     // Nobody can provide it right now; keep wanting it.
@@ -557,8 +635,16 @@ impl SyncEngine {
     /// When to try again without any outside event: chunks no connected
     /// peer could provide, and paths backing off after errors.
     fn update_retry(&mut self) {
-        let chunks = (!self.wanted.is_empty() && self.in_flight.is_empty())
-            .then(|| self.clock.now() + self.config.request_timeout);
+        let now = self.clock.now();
+        // When the first peer that refused a wanted chunk may be asked again.
+        let chunks = (!self.wanted.is_empty() && self.in_flight.is_empty()).then(|| {
+            self.lacking
+                .values()
+                .map(|(until, _)| *until)
+                .filter(|until| *until > now)
+                .min()
+                .unwrap_or(now + self.config.request_timeout)
+        });
         let failures = self.failing.values().map(|(_, at)| *at).min();
         self.retry_at = chunks.into_iter().chain(failures).min();
     }
@@ -582,7 +668,6 @@ impl SyncEngine {
                 self.dirty = true;
             }
         }
-        self.lacking.retain(|_, until| *until > now);
         if self.retry_at.is_some_and(|t| t <= now) {
             self.retry_at = None;
             self.dirty = true;
@@ -623,6 +708,15 @@ impl SyncEngine {
                 {
                     self.blocked
                         .push((path.clone(), format!("failed {n} time(s); retrying")));
+                    still_pending.insert(path);
+                    continue;
+                }
+                let record = action.record();
+                if record.is_live_file() && self.held_back(record.size) {
+                    self.blocked.push((
+                        path.clone(),
+                        "large file: waiting for an unmetered network".into(),
+                    ));
                     still_pending.insert(path);
                     continue;
                 }

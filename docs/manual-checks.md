@@ -18,3 +18,5 @@ with date, OS version and result. CI only covers compile + automated tests.
 | M10 | "Start at login" toggles the HKCU Run value / LaunchAgent plist and survives a log-out/in (Windows: launch the tray via `explorer.exe` when testing from a sandboxed shell) | not yet run | not yet run |
 | M10 | Status page: pair a device, add a folder, pause/resume, conflict list | not yet run | not yet run |
 | M10 | Idle CPU ≈ 0 and memory of `bsyncd` + `bsync-tray` (record below) | not yet run | not yet run |
+| M11 | On a phone hotspot (Windows: metered connection; macOS: iPhone hotspot or Low Data Mode) `bsync status` shows "Network: metered" and a >50 MB file waits; back on Wi-Fi it syncs | not yet run | not yet run |
+| M11 | `bsync bandwidth --up 500` limits upload to ~500 kB/s (watch Task Manager / Activity Monitor) | not yet run | not yet run |

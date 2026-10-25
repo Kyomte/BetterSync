@@ -99,6 +99,9 @@ pub struct PeerDto {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StatusDto {
+    /// Large files wait for an unmetered network.
+    #[serde(default)]
+    pub metered: bool,
     pub device_id: String,
     pub device_name: String,
     pub listen: Option<String>,
@@ -109,6 +112,7 @@ pub struct StatusDto {
 impl StatusDto {
     pub fn from_status(s: &DaemonStatus, config: &Config) -> Self {
         Self {
+            metered: s.metered,
             device_id: s.device_id.map(|d| d.to_string()).unwrap_or_default(),
             device_name: s.device_name.clone(),
             listen: s.listen.map(|a| a.to_string()),
@@ -186,6 +190,19 @@ pub struct FolderRequest {
     pub path: String,
     #[serde(default)]
     pub devices: Vec<String>,
+}
+
+/// Change bandwidth settings; unset fields stay as they are.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BandwidthRequest {
+    #[serde(default)]
+    pub metered: Option<String>,
+    #[serde(default)]
+    pub large_file_mb: Option<u64>,
+    #[serde(default)]
+    pub max_upload_kbps: Option<u64>,
+    #[serde(default)]
+    pub max_download_kbps: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -363,6 +380,40 @@ async fn rescan(State(state): State<ApiState>, UrlPath(id): UrlPath<String>) -> 
     ok(format!("rescanned {id}"))
 }
 
+async fn bandwidth(
+    State(state): State<ApiState>,
+    Json(req): Json<BandwidthRequest>,
+) -> ApiResult<OkDto> {
+    let mode = req
+        .metered
+        .as_deref()
+        .map(str::parse::<crate::config::MeteredMode>)
+        .transpose()?;
+    let mut summary = String::new();
+    edit_config(&state, |c| {
+        let b = &mut c.bandwidth;
+        if let Some(m) = mode {
+            b.metered = m;
+        }
+        if let Some(v) = req.large_file_mb {
+            b.large_file_mb = v;
+        }
+        if let Some(v) = req.max_upload_kbps {
+            b.max_upload_kbps = v;
+        }
+        if let Some(v) = req.max_download_kbps {
+            b.max_download_kbps = v;
+        }
+        summary = format!(
+            "metered: {:?}, large files over {} MB wait on metered networks, upload {} kB/s, download {} kB/s (0 = unlimited)",
+            b.metered, b.large_file_mb, b.max_upload_kbps, b.max_download_kbps
+        );
+        Ok(())
+    })
+    .await?;
+    ok(summary)
+}
+
 async fn auth(State(state): State<ApiState>, req: Request, next: Next) -> Response {
     let expected = format!("Bearer {}", state.token);
     let given = req
@@ -389,6 +440,7 @@ fn router(state: ApiState) -> Router {
         .route("/api/folders/{id}/pause", post(pause))
         .route("/api/folders/{id}/resume", post(resume))
         .route("/api/folders/{id}/rescan", post(rescan))
+        .route("/api/bandwidth", post(bandwidth))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth))
         .merge(crate::ui::router())
         .with_state(state)

@@ -19,7 +19,7 @@ use bsync_fs::{FolderWatcher, StdFs, WatchConfig, WatchEvent};
 use bsync_index::Index;
 use bsync_net::{Dialer, Discovery, Identity, NetEvent, PairedSet, QuicNet};
 
-use crate::config::{Config, FolderConfig};
+use crate::config::{Config, FolderConfig, MeteredMode};
 
 /// A request to the engine thread, answered on `reply`.
 pub enum Control {
@@ -40,6 +40,8 @@ impl std::fmt::Debug for Control {
 pub enum Event {
     Net(NetEvent),
     Watch(String, WatchEvent),
+    /// The OS says the network became metered / unmetered.
+    Metered(bool),
     Control(Control),
     Shutdown,
 }
@@ -66,6 +68,8 @@ pub struct PeerStatus {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DaemonStatus {
+    /// Large files wait for an unmetered network.
+    pub metered: bool,
     pub device_id: Option<DeviceId>,
     pub device_name: String,
     pub listen: Option<SocketAddr>,
@@ -110,6 +114,8 @@ struct EngineThread {
     events_tx: mpsc::Sender<Event>,
     peers_seen: std::collections::BTreeMap<DeviceId, (String, SocketAddr)>,
     dialer: Arc<Dialer>,
+    /// What the OS last said (Auto mode).
+    os_metered: bool,
 }
 
 /// A running daemon.
@@ -123,6 +129,7 @@ pub struct Daemon {
     config_dir: PathBuf,
     api_addr: SocketAddr,
     _discovery: Option<Discovery>,
+    _metered: Option<bsync_net::metered::MeteredWatcher>,
 }
 
 impl std::fmt::Debug for Daemon {
@@ -213,6 +220,16 @@ impl Daemon {
             None
         };
 
+        // Follow the OS's metered-network state (Windows, macOS).
+        let metered_watcher = {
+            let tx = Mutex::new(events_tx.clone());
+            bsync_net::metered::watch(move |m| {
+                if let Ok(tx) = tx.lock() {
+                    let _ = tx.send(Event::Metered(m));
+                }
+            })
+        };
+
         let api_listen: SocketAddr = config
             .api_listen
             .parse()
@@ -230,6 +247,7 @@ impl Daemon {
             events_tx: events_tx.clone(),
             peers_seen: Default::default(),
             dialer: Arc::clone(&dialer),
+            os_metered: false,
         };
         thread_state.open_folders(watch);
         let thread = std::thread::Builder::new()
@@ -246,6 +264,7 @@ impl Daemon {
             config_dir: config_dir.to_path_buf(),
             api_addr,
             _discovery: discovery,
+            _metered: metered_watcher,
         })
     }
 
@@ -396,6 +415,8 @@ impl EngineThread {
             random_u64,
         )?;
         engine.set_paused(cfg.paused);
+        engine.set_metered_max_file(self.config.bandwidth.large_file_bytes());
+        engine.set_metered(self.metered());
         engine.full_scan()?;
         let tx = Mutex::new(self.events_tx.clone());
         let id = cfg.id.clone();
@@ -424,6 +445,7 @@ impl EngineThread {
                 addr: SocketAddr::from(([0, 0, 0, 0], 0)),
             });
         }
+        self.apply_bandwidth();
         // Work found by the startup scans (no event may come for a while).
         self.tick_all();
         loop {
@@ -459,10 +481,39 @@ impl EngineThread {
                     Event::Shutdown => return,
                     Event::Net(n) => self.on_net(n),
                     Event::Watch(id, w) => self.on_watch(&id, w),
+                    Event::Metered(m) => {
+                        self.os_metered = m;
+                        self.apply_bandwidth();
+                    }
                     Event::Control(c) => self.on_control(c, &paired, &folders_cfg, watch),
                 }
             }
             self.tick_all();
+        }
+    }
+
+    /// The effective metered state: configuration first, then the OS.
+    fn metered(&self) -> bool {
+        match self.config.bandwidth.metered {
+            MeteredMode::Yes => true,
+            MeteredMode::No => false,
+            MeteredMode::Auto => self.os_metered,
+        }
+    }
+
+    /// Push bandwidth settings to the transport and the engines.
+    fn apply_bandwidth(&mut self) {
+        let b = &self.config.bandwidth;
+        self.net
+            .set_rate_limits(b.max_upload_kbps * 1000, b.max_download_kbps * 1000);
+        let metered = self.metered();
+        let max = b.large_file_bytes();
+        tracing::info!(metered, "network policy");
+        for f in &mut self.folders {
+            if let Some(e) = f.engine.as_mut() {
+                e.set_metered_max_file(max);
+                e.set_metered(metered);
+            }
         }
     }
 
@@ -588,6 +639,7 @@ impl EngineThread {
             })
             .collect();
         DaemonStatus {
+            metered: self.metered(),
             device_id: Some(self.me),
             device_name: self.config.device_name.clone(),
             listen: self.net.local_addr().ok(),
@@ -662,11 +714,15 @@ impl EngineThread {
             self.net.disconnect(&d);
         }
         self.dialer.set_devices(config.dial_targets());
+        let bandwidth_changed = config.bandwidth != self.config.bandwidth;
         if let Ok(mut f) = folders_cfg.write() {
             *f = config.folders.clone();
         }
         let old: Vec<FolderConfig> = self.folders.iter().map(|f| f.config.clone()).collect();
         self.config = config;
+        if bandwidth_changed {
+            self.apply_bandwidth();
+        }
         if old != self.config.folders {
             // Keep folders whose config is unchanged; reopen the others.
             let mut previous = std::mem::take(&mut self.folders);

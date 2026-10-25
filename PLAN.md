@@ -193,7 +193,7 @@ Legend: 🐧 = fully verifiable on Linux / in a cloud session. 💻 = needs a ma
 
 **Done when:** 💻 manual checklist passes on both OSes; idle CPU ≈ 0 and memory recorded in README.
 
-### M11 — Bandwidth policies 💻
+### M11 — Bandwidth policies 💻 ✅ (code done; 💻 checks pending)
 - Metered-network detection, big-files-on-Wi-Fi-only, rate limits.
 
 ### Stretch

@@ -322,6 +322,7 @@ dependencies = [
 name = "bsync-net"
 version = "0.1.0"
 dependencies = [
+ "block2",
  "bsync-core",
  "bsync-proto",
  "mdns-sd",
@@ -332,6 +333,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "windows",
  "x509-parser",
 ]
 

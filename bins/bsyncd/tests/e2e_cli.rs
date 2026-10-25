@@ -220,3 +220,66 @@ fn ureq_get(url: &str) -> u16 {
     s.read_to_string(&mut buf).unwrap();
     buf.split_whitespace().nth(1).unwrap().parse().unwrap()
 }
+
+#[test]
+fn metered_network_holds_back_large_files() {
+    ensure_built();
+    let tmp = tempfile::tempdir().unwrap();
+    let (ca, cb) = (tmp.path().join("cfg-a"), tmp.path().join("cfg-b"));
+    let (fa, fb) = (tmp.path().join("folder-a"), tmp.path().join("folder-b"));
+    let (pa, pb) = (free_udp_port(), free_udp_port());
+    let id_a = cli(
+        &ca,
+        &[
+            "init",
+            "--listen",
+            &format!("127.0.0.1:{pa}"),
+            "--api",
+            "127.0.0.1:0",
+        ],
+    );
+    let id_b = cli(
+        &cb,
+        &[
+            "init",
+            "--listen",
+            &format!("127.0.0.1:{pb}"),
+            "--api",
+            "127.0.0.1:0",
+        ],
+    );
+    let (id_a, id_b) = (id_a.trim().to_owned(), id_b.trim().to_owned());
+    // b is on a "metered" network; files over 1 MB wait.
+    cli(
+        &cb,
+        &["bandwidth", "--metered", "yes", "--large-file-mb", "1"],
+    );
+    let _da = start(&ca);
+    let _db = start(&cb);
+    assert!(cli(&cb, &["status"]).contains("Network: metered"));
+    cli(&ca, &["pair", &id_b, "--addr", &format!("127.0.0.1:{pb}")]);
+    cli(&cb, &["pair", &id_a, "--addr", &format!("127.0.0.1:{pa}")]);
+    std::fs::create_dir_all(&fa).unwrap();
+    std::fs::write(fa.join("small.txt"), b"small").unwrap();
+    std::fs::write(fa.join("big.bin"), vec![3u8; 3 * 1024 * 1024]).unwrap();
+    cli(
+        &ca,
+        &["folder", "add", "f", fa.to_str().unwrap(), "--share", &id_b],
+    );
+    cli(
+        &cb,
+        &["folder", "add", "f", fb.to_str().unwrap(), "--share", &id_a],
+    );
+
+    eventually(30, "small file synced", || fb.join("small.txt").exists());
+    eventually(10, "big file reported as waiting", || {
+        cli(&cb, &["status"]).contains("unmetered")
+    });
+    assert!(!fb.join("big.bin").exists());
+
+    let out = cli(&cb, &["bandwidth", "--metered", "no", "--down", "0"]);
+    assert!(out.contains("metered: No"), "{out}");
+    eventually(30, "big file synced once unmetered", || {
+        std::fs::metadata(fb.join("big.bin")).is_ok_and(|m| m.len() == 3 * 1024 * 1024)
+    });
+}

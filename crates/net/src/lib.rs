@@ -8,13 +8,16 @@ use bsync_core::DeviceId;
 pub mod dialer;
 pub mod discovery;
 mod identity;
+pub mod metered;
 pub mod quic;
+pub mod rate;
 pub mod tls;
 
 pub use dialer::Dialer;
 pub use discovery::Discovery;
 pub use identity::Identity;
 pub use quic::{EventSink, FoldersFor, NetEvent, QuicNet, QuicTransport};
+pub use rate::RateLimit;
 pub use tls::PairedSet;
 
 #[derive(Debug, thiserror::Error)]

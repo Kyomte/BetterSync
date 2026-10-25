@@ -265,3 +265,52 @@ async fn dialer_tries_addresses_until_one_works() {
     }
     assert!(reconnected);
 }
+
+#[tokio::test]
+async fn upload_and_download_limits_slow_transfers() {
+    let mut a = Peer::new("a");
+    let mut b = Peer::new("b");
+    a.pair(&b);
+    b.pair(&a);
+    a.net
+        .connect(b.id(), b.net.local_addr().unwrap())
+        .await
+        .unwrap();
+    assert!(matches!(a.next().await, Some(NetEvent::Connected { .. })));
+    assert!(matches!(b.next().await, Some(NetEvent::Connected { .. })));
+
+    let chunk = |n: u8| Message::ChunkData {
+        folder: FolderId("f".into()),
+        id: u64::from(n),
+        hash: bsync_core::Hash::default(),
+        data: Some(vec![n; 50_000]),
+    };
+    for (limit_up, limit_down) in [(150_000, 0), (0, 150_000)] {
+        a.net.set_rate_limits(limit_up, 0);
+        b.net.set_rate_limits(0, limit_down);
+        let start = std::time::Instant::now();
+        for n in 0..9 {
+            a.net.transport().send(b.id(), chunk(n).encode()).unwrap(); // ~450 kB
+        }
+        for _ in 0..9 {
+            assert!(matches!(b.next().await, Some(NetEvent::Message { .. })));
+        }
+        // One second of burst, then 150 kB/s: about 2 s.
+        let took = start.elapsed();
+        assert!(
+            took >= Duration::from_millis(1500),
+            "up {limit_up} down {limit_down}: {took:?}"
+        );
+        assert!(took <= Duration::from_secs(5), "{took:?}");
+    }
+    a.net.set_rate_limits(0, 0);
+    b.net.set_rate_limits(0, 0);
+    let start = std::time::Instant::now();
+    for n in 0..9 {
+        a.net.transport().send(b.id(), chunk(n).encode()).unwrap();
+    }
+    for _ in 0..9 {
+        assert!(matches!(b.next().await, Some(NetEvent::Message { .. })));
+    }
+    assert!(start.elapsed() < Duration::from_millis(1000));
+}
