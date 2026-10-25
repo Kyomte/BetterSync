@@ -4,10 +4,12 @@
 //! ([`SimNetwork`]) and a seeded RNG ([`SimRng`]). Given the same seed, a
 //! simulation run is exactly reproducible.
 
+mod cluster;
 mod memfs;
 mod net;
 mod rng;
 
+pub use cluster::{Cluster, Node, ROOT, SimClock, device};
 pub use memfs::MemFs;
 pub use net::{Delivery, SimEndpoint, SimNetwork};
 pub use rng::SimRng;

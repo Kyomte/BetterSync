@@ -1,16 +1,38 @@
-//! Networking for BetterSync: the [`Transport`] trait, and (from M4) the QUIC
-//! transport, device identity, pairing and discovery.
-//!
-//! The engine only talks to peers through [`Transport`] so the simulator can
-//! swap in an in-memory network. The trait's shape is provisional and is
-//! expected to be revised when the QUIC transport lands in M4.
+//! Networking for BetterSync: the [`Transport`] trait the engine sends
+//! through, device identity, pinned-certificate TLS and the QUIC transport.
+
+use std::io;
 
 use bsync_core::DeviceId;
+
+mod identity;
+pub mod quic;
+pub mod tls;
+
+pub use identity::Identity;
+pub use quic::{EventSink, FoldersFor, NetEvent, QuicNet, QuicTransport};
+pub use tls::PairedSet;
 
 #[derive(Debug, thiserror::Error)]
 pub enum NetError {
     #[error("peer {0:?} is unreachable")]
     Unreachable(DeviceId),
+    #[error("device {0} is not paired")]
+    NotPaired(DeviceId),
+    #[error("TLS setup failed: {0}")]
+    Tls(String),
+    #[error("connection failed: {0}")]
+    Connect(String),
+    #[error("protocol error: {0}")]
+    Protocol(String),
+    #[error("I/O error: {0}")]
+    Io(#[from] io::Error),
+}
+
+impl NetError {
+    pub(crate) fn tls(e: impl std::fmt::Display) -> Self {
+        Self::Tls(e.to_string())
+    }
 }
 
 /// A device's outgoing connection to its peers. Messages are opaque byte

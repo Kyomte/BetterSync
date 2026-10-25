@@ -146,7 +146,7 @@ Legend: 🐧 = fully verifiable on Linux / in a cloud session. 💻 = needs a ma
 
 **Done when:** two temp dirs, A → B, reach byte-identical state across a scripted set of creates/edits/deletes/renames; versions folder holds replaced content.
 
-### M4 — Identity, pairing, transport 🐧
+### M4 — Identity, pairing, transport 🐧 ✅
 - Ed25519 key generation + storage; self-signed cert via `rcgen`; QUIC via `quinn` with custom cert verifier that pins device IDs.
 - `proto`: Hello (protocol version, device ID, folders), IndexUpdate(since_seq), RequestChunk, ChunkData, Ping.
 - Pairing: `bsync pair <device-id>` on both sides (manual mutual add, like Syncthing). No unpaired connections accepted.

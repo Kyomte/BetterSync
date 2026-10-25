@@ -9,6 +9,9 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+bsyncd.workspace = true
+bsync-core.workspace = true
+clap.workspace = true
 
 [lints]
 workspace = true

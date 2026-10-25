@@ -107,3 +107,49 @@ mod tests {
         assert_eq!(offsets, vec![0, 2]);
     }
 }
+
+/// Whether `path` is an acceptable relative path from a peer: non-empty
+/// `/`-separated components, none of them `.`/`..`/empty, no backslashes or
+/// NULs, and not BetterSync's own bookkeeping. Anything else could escape
+/// the folder and is rejected.
+pub fn is_valid_rel_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.contains('\\')
+        && !path.contains('\0')
+        && path
+            .split('/')
+            .all(|c| !c.is_empty() && c != "." && c != "..")
+        && path.split('/').next() != Some(".bsync")
+        && !path
+            .rsplit('/')
+            .next()
+            .is_some_and(|n| n.starts_with(".bsync-tmp-"))
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_escaping_and_internal_paths() {
+        for ok in ["a", "a/b.txt", ".hidden", "x/.bsync", "a..b"] {
+            assert!(is_valid_rel_path(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "/a",
+            "a/",
+            "a//b",
+            ".",
+            "..",
+            "a/../b",
+            "a\\b",
+            "a\0",
+            ".bsync",
+            ".bsync/versions/x",
+            "d/.bsync-tmp-f-1",
+        ] {
+            assert!(!is_valid_rel_path(bad), "{bad:?}");
+        }
+    }
+}

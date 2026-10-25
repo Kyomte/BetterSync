@@ -9,6 +9,9 @@ publish.workspace = true
 
 [dependencies]
 bsync-core.workspace = true
+serde.workspace = true
+postcard.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

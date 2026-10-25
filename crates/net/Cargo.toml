@@ -10,6 +10,16 @@ publish.workspace = true
 [dependencies]
 bsync-core.workspace = true
 thiserror.workspace = true
+bsync-proto.workspace = true
+tokio.workspace = true
+quinn.workspace = true
+rustls.workspace = true
+rcgen.workspace = true
+x509-parser.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

@@ -11,6 +11,9 @@ publish.workspace = true
 bsync-core.workspace = true
 bsync-fs.workspace = true
 bsync-net.workspace = true
+bsync-index.workspace = true
+bsync-proto.workspace = true
+bsync-engine.workspace = true
 
 [lints]
 workspace = true

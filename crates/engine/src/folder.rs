@@ -172,6 +172,10 @@ impl Folder {
         &*self.fs
     }
 
+    pub fn fs_arc(&self) -> Arc<dyn FileSystem> {
+        Arc::clone(&self.fs)
+    }
+
     pub fn params(&self) -> ChunkParams {
         self.params
     }
