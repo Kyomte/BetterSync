@@ -82,6 +82,7 @@ fn ctx(root: &Path) -> ScanContext<'_> {
         fs: &StdFs,
         root,
         device: DeviceId::from_bytes([1; 32]),
+        counter_floor: 0,
         params: ChunkParams::DEFAULT,
         skip: &no_skip,
     }

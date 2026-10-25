@@ -19,6 +19,9 @@ pub struct ScanContext<'a> {
     pub fs: &'a dyn FileSystem,
     pub root: &'a Path,
     pub device: DeviceId,
+    /// Lowest counter value a new local version may get (current Unix time
+    /// in seconds); see [`Index::next_own_counter`].
+    pub counter_floor: u64,
     pub params: ChunkParams,
     /// Extra paths to leave out (ignore rules).
     pub skip: &'a dyn Fn(&str, &Metadata) -> bool,
@@ -49,7 +52,12 @@ pub fn stat_of(meta: &Metadata) -> LocalStat {
 }
 
 /// A new local version of `path` replacing `previous` (if any).
-pub fn new_version(previous: Option<&FileRecord>, path: &str, device: DeviceId) -> FileRecord {
+pub fn new_version(
+    previous: Option<&FileRecord>,
+    path: &str,
+    device: DeviceId,
+    counter_floor: u64,
+) -> FileRecord {
     FileRecord {
         path: path.to_owned(),
         kind: previous.map_or(EntryKind::File, |p| p.kind),
@@ -59,7 +67,7 @@ pub fn new_version(previous: Option<&FileRecord>, path: &str, device: DeviceId) 
         version: previous
             .map(|p| p.version.clone())
             .unwrap_or_default()
-            .incremented(device),
+            .incremented_at_least(device, counter_floor),
         modified_by: device,
         hash: Hash::default(),
         chunks: Vec::new(),
@@ -67,8 +75,8 @@ pub fn new_version(previous: Option<&FileRecord>, path: &str, device: DeviceId) 
 }
 
 /// A tombstone recording that `previous` was deleted on `device`.
-pub fn tombstone(previous: &FileRecord, device: DeviceId) -> FileRecord {
-    let mut r = new_version(Some(previous), &previous.path, device);
+pub fn tombstone(previous: &FileRecord, device: DeviceId, counter_floor: u64) -> FileRecord {
+    let mut r = new_version(Some(previous), &previous.path, device, counter_floor);
     r.deleted = true;
     r
 }
@@ -120,7 +128,12 @@ fn update_entry(
             if prev.is_some_and(FileRecord::is_live_dir) {
                 return Ok(false);
             }
-            let mut r = new_version(prev, &entry.path, ctx.device);
+            let mut r = new_version(
+                prev,
+                &entry.path,
+                ctx.device,
+                index.next_own_counter(ctx.counter_floor)?,
+            );
             r.kind = EntryKind::Dir;
             r.mtime_ns = mtime_ns(entry.metadata.modified);
             index.put(&r, None)?;
@@ -143,7 +156,12 @@ fn update_entry(
                     return Ok(false);
                 }
             }
-            let mut r = new_version(prev, &entry.path, ctx.device);
+            let mut r = new_version(
+                prev,
+                &entry.path,
+                ctx.device,
+                index.next_own_counter(ctx.counter_floor)?,
+            );
             r.kind = EntryKind::File;
             r.size = chunked.size;
             r.mtime_ns = mtime_ns(meta.modified);
@@ -196,6 +214,7 @@ pub fn scan(ctx: &ScanContext<'_>, index: &mut Index, subtree: &str) -> Result<S
             seen.insert(entry.path.as_str());
             let existing = index.get(&entry.path)?;
             if update_entry(ctx, index, entry, existing.as_ref(), &mut stats)? {
+                tracing::debug!(device = ?ctx.device, path = %entry.path, "scan: changed");
                 stats.changed.push(entry.path.clone());
             }
         }
@@ -213,7 +232,9 @@ pub fn scan(ctx: &ScanContext<'_>, index: &mut Index, subtree: &str) -> Result<S
             if (ctx.skip)(path, &placeholder_meta(&e.record)) {
                 continue;
             }
-            index.put(&tombstone(&e.record, ctx.device), None)?;
+            tracing::debug!(device = ?ctx.device, path = %e.record.path, "scan: deleted");
+            let counter = index.next_own_counter(ctx.counter_floor)?;
+            index.put(&tombstone(&e.record, ctx.device, counter), None)?;
             stats.changed.push(e.record.path.clone());
         }
         Ok(stats)
@@ -245,6 +266,7 @@ mod tests {
             fs: &StdFs,
             root,
             device: DEV,
+            counter_floor: 0,
             params: ChunkParams::DEFAULT,
             skip,
         }
@@ -299,7 +321,7 @@ mod tests {
         let a = index.get("docs/a.txt").unwrap().unwrap().record;
         assert_eq!(a.hash, Hash::of(b"alpha"));
         assert_eq!(a.size, 5);
-        assert_eq!(a.version.get(&DEV), 1);
+        assert!(a.version.get(&DEV) > 0);
         assert_eq!(a.modified_by, DEV);
         assert!(index.get("docs").unwrap().unwrap().record.is_live_dir());
         assert_eq!(index.max_seq().unwrap(), 5);
@@ -330,16 +352,19 @@ mod tests {
         write(root, "y", b"why");
         let mut index = Index::open_in_memory().unwrap();
         scan(&ctx(root, &no_skip), &mut index, "").unwrap();
+        let y1 = index.get("y").unwrap().unwrap().record.version;
+        let x1 = index.get("d/x").unwrap().unwrap().record.version;
 
         write(root, "y", b"why not");
         std::fs::remove_dir_all(root.join("d")).unwrap();
         let stats = scan(&ctx(root, &no_skip), &mut index, "").unwrap();
         assert_eq!(stats.changed, vec!["y", "d", "d/x"]);
         let y = index.get("y").unwrap().unwrap().record;
-        assert_eq!(y.version.get(&DEV), 2);
+        assert_eq!(y.version.compare(&y1), bsync_core::Causality::Newer);
         let x = index.get("d/x").unwrap().unwrap().record;
         assert!(x.deleted);
-        assert_eq!(x.version.get(&DEV), 2);
+        assert_eq!(x.version.compare(&x1), bsync_core::Causality::Newer);
+        let x2 = x.version;
         assert!(index.find_chunk(&Hash::of(b"one")).unwrap().is_empty());
 
         // Recreating continues the same version history.
@@ -348,7 +373,7 @@ mod tests {
         scan(&ctx(root, &no_skip), &mut index, "d").unwrap();
         let x = index.get("d/x").unwrap().unwrap().record;
         assert!(!x.deleted);
-        assert_eq!(x.version.get(&DEV), 3);
+        assert_eq!(x.version.compare(&x2), bsync_core::Causality::Newer);
     }
 
     #[test]

@@ -81,6 +81,32 @@ pub fn plan_path(local: Option<&FileRecord>, remotes: &[FileRecord]) -> Option<A
         // Equal vectors with different content should not happen; resolve it
         // like a conflict so devices still converge.
         Causality::Equal | Causality::Concurrent => {
+            // Some announced version has already seen past ours, so ours is
+            // not a contender even though it is concurrent with the winner.
+            let newer: Vec<&FileRecord> = remotes
+                .iter()
+                .filter(|r| r.version.compare(&local.version) == Causality::Newer)
+                .collect();
+            if !newer.is_empty() {
+                // A newer record with our content just carries it forward
+                // (a merged vector): become that record, and resolve the
+                // conflict as one of its holders.
+                if let Some(carrier) = newer
+                    .iter()
+                    .filter(|r| r.same_content(local))
+                    .max_by(|a, b| conflict_order(a, b))
+                {
+                    return Some(Action::AdoptVersion((*carrier).clone()));
+                }
+                // Otherwise its author replaced our content knowingly. Take
+                // the winner as announced; never mint a merged vector here,
+                // since only a device that saved the loser may do that.
+                return Some(if local.same_content(target) {
+                    Action::AdoptVersion(target.clone())
+                } else {
+                    Action::Apply(target.clone())
+                });
+            }
             let merged = local.version.merged(&target.version);
             if local.same_content(target) {
                 let mut r = if conflict_order(local, target) == Ordering::Less {
@@ -269,6 +295,41 @@ mod tests {
             Some(Action::Conflict { .. })
         ));
         assert_eq!(plan_path(Some(&dir), &[f]), None);
+    }
+
+    /// Regression (fuzz seed 3): two concurrent deletions, and a local live
+    /// version that one of them already supersedes. The local version must
+    /// not "win" against the other deletion and stay forever.
+    #[test]
+    fn locally_obsolete_version_does_not_contend() {
+        let mine = file(b"old", 3, &[(3, 1)]);
+        let del_a = deleted(file(b"", 4, &[(2, 2), (4, 2)]));
+        let del_b = deleted(file(b"", 3, &[(3, 5)]));
+        let remotes = [del_a.clone(), del_b];
+        assert_eq!(pick_target(&remotes), Some(&del_a));
+        assert_eq!(plan_path(Some(&mine), &remotes), Some(Action::Apply(del_a)));
+    }
+
+    /// Regression (fuzz seed 46): a newer record that merely carries our
+    /// content forward must not make us drop that content.
+    #[test]
+    fn newer_record_with_our_content_is_adopted_not_discarded() {
+        let mine = file(b"ours", 1, &[(1, 80), (4, 1)]);
+        let carrier = FileRecord {
+            version: mine.version.merged(&VersionVector::from([(d(4), 18)])),
+            ..mine.clone()
+        };
+        let winner = file(b"theirs", 3, &[(1, 18), (3, 80), (4, 18)]);
+        let remotes = [carrier.clone(), winner];
+        assert_eq!(
+            plan_path(Some(&mine), &remotes),
+            Some(Action::AdoptVersion(carrier.clone()))
+        );
+        // Next round, as the carrier's holder, we lose and save a copy.
+        assert!(matches!(
+            plan_path(Some(&carrier), &remotes),
+            Some(Action::Conflict { .. })
+        ));
     }
 
     #[test]

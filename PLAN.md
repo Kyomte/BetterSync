@@ -161,7 +161,7 @@ Legend: 🐧 = fully verifiable on Linux / in a cloud session. 💻 = needs a ma
 
 **Done when:** tests for every case in "The nasty cases" that are OS-independent; two daemons converge under concurrent edits.
 
-### M6 — Simulator / fuzzing 🐧
+### M6 — Simulator / fuzzing 🐧 ✅
 - `sim` runs N (3–5) engines on the in-memory FS + network with random operations, random partitions/reconnects, random restarts.
 - After quiescence assert: all folders identical, no lost edits (every edit present as a file or conflict copy), invariants hold.
 - `proptest` or a seeded loop; failing seeds are printed and saved as regression tests.

@@ -5,6 +5,7 @@
 //! simulation run is exactly reproducible.
 
 mod cluster;
+pub mod fuzz;
 mod memfs;
 mod net;
 mod rng;

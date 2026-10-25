@@ -70,6 +70,8 @@ pub enum Outcome {
     LocalChanged,
     /// These chunks must be fetched first.
     MissingChunks(Vec<Hash>),
+    /// The action no longer matches the plan for this path; plan again.
+    Stale,
     /// Cannot be applied right now (e.g. the parent is a file, or the name
     /// is not allowed here); retried later.
     Blocked(String),
@@ -104,6 +106,14 @@ impl std::fmt::Debug for Folder {
             .field("root", &self.root)
             .field("device", &self.device)
             .finish_non_exhaustive()
+    }
+}
+
+fn action_name(a: &Action) -> &'static str {
+    match a {
+        Action::Apply(_) => "apply",
+        Action::AdoptVersion(_) => "adopt",
+        Action::Conflict { .. } => "conflict",
     }
 }
 
@@ -180,6 +190,20 @@ impl Folder {
         self.params
     }
 
+    /// The current Unix time in seconds: the lowest counter a new local
+    /// version gets (see [`bsync_core::VersionVector::incremented_at_least`]).
+    fn counter_floor(&self) -> u64 {
+        self.clock
+            .now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs())
+    }
+
+    /// A fresh counter for a new local version.
+    fn own_counter(&self) -> Result<u64> {
+        Ok(self.index.next_own_counter(self.counter_floor())?)
+    }
+
     pub fn abs(&self, rel: &str) -> PathBuf {
         rel_to_path(&self.root, rel)
     }
@@ -195,6 +219,7 @@ impl Folder {
             fs: &*self.fs,
             root: &self.root,
             device: self.device,
+            counter_floor: self.counter_floor(),
             params: self.params,
             skip: &*self.skip,
         };
@@ -256,6 +281,11 @@ impl Folder {
         stats: &mut SyncStats,
     ) -> Result<Outcome> {
         let path = action.record().path.clone();
+        // Actions are planned in batches; an earlier one in the batch (e.g.
+        // saving a conflict copy) may have changed this path since.
+        if self.plan(&path)?.as_ref() != Some(action) {
+            return Ok(Outcome::Stale);
+        }
         let entry = self.index.get(&path)?;
         let outcome = match action {
             Action::AdoptVersion(record) => {
@@ -283,6 +313,16 @@ impl Folder {
                 }
             }
         };
+        tracing::debug!(
+            device = ?self.device,
+            path = %path,
+            action = action_name(action),
+            deleted = action.record().deleted,
+            version = ?action.record().version,
+            hash = ?action.record().hash,
+            ?outcome,
+            "apply"
+        );
         if outcome == Outcome::Done {
             stats.applied += 1;
             if matches!(action, Action::Conflict { .. }) {
@@ -372,7 +412,12 @@ impl Folder {
                 }
             }
             if !entry.as_ref().is_some_and(|e| e.record.is_live_dir()) {
-                let mut r = new_version(entry.as_ref().map(|e| &e.record), &dir, self.device);
+                let mut r = new_version(
+                    entry.as_ref().map(|e| &e.record),
+                    &dir,
+                    self.device,
+                    self.own_counter()?,
+                );
                 r.kind = EntryKind::Dir;
                 self.index.put(&r, None)?;
             }
@@ -461,13 +506,19 @@ impl Folder {
         self.fs.rename(&self.abs(&loser.path), &self.abs(&copy))?;
         let meta = self.fs.metadata(&self.abs(&copy))?;
         let prev = self.index.get(&copy)?;
-        let mut r = new_version(prev.as_ref().map(|e| &e.record), &copy, self.device);
+        let mut r = new_version(
+            prev.as_ref().map(|e| &e.record),
+            &copy,
+            self.device,
+            self.own_counter()?,
+        );
         r.kind = EntryKind::File;
         r.size = loser.size;
         r.hash = loser.hash;
         r.chunks = loser.chunks.clone();
         r.mtime_ns = mtime_ns(meta.modified);
         self.index.put(&r, Some(stat_of(&meta)))?;
+        tracing::debug!(device = ?self.device, path = %copy, version = ?r.version, hash = ?r.hash, "conflict copy saved");
         tracing::info!(path = %loser.path, copy = %copy, "conflict: kept local version as copy");
         Ok(())
     }
@@ -493,12 +544,13 @@ impl Folder {
                     // Something inside must survive (e.g. a file added here
                     // after the remote deleted the directory): keep the
                     // directory, as a version that has seen the deletion.
-                    let mut r = new_version(entry.map(|e| &e.record), rel, self.device);
+                    let counter = self.own_counter()?;
+                    let mut r = new_version(entry.map(|e| &e.record), rel, self.device, counter);
                     r.kind = EntryKind::Dir;
                     r.version = record
                         .version
                         .merged(&entry.map(|e| e.record.version.clone()).unwrap_or_default())
-                        .incremented(self.device);
+                        .incremented_at_least(self.device, counter);
                     self.index.put(&r, None)?;
                     return Ok(Outcome::Done);
                 }
@@ -743,7 +795,7 @@ impl Folder {
             for action in self.plan_all()? {
                 let path = action.record().path.clone();
                 match self.apply(&action, source, &mut stats)? {
-                    Outcome::Done => progress = true,
+                    Outcome::Done | Outcome::Stale => progress = true,
                     Outcome::LocalChanged => {
                         if !self.scan(&path)?.changed.is_empty() {
                             progress = true;

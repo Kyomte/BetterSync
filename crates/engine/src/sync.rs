@@ -112,7 +112,11 @@ pub struct SyncEngine {
     wanted: VecDeque<(Hash, String)>,
     in_flight: BTreeMap<u64, Request>,
     /// Peers that told us they lack a chunk.
-    lacking: BTreeSet<(DeviceId, Hash)>,
+    /// Peers that recently could not provide a chunk, until when to avoid
+    /// asking them again.
+    lacking: BTreeMap<(DeviceId, Hash), SystemTime>,
+    /// Work is stalled on chunks nobody could provide; try again then.
+    retry_at: Option<SystemTime>,
     next_request: u64,
     /// Something happened that may let pending work proceed.
     dirty: bool,
@@ -154,7 +158,8 @@ impl SyncEngine {
             pending,
             wanted: VecDeque::new(),
             in_flight: BTreeMap::new(),
-            lacking: BTreeSet::new(),
+            lacking: BTreeMap::new(),
+            retry_at: None,
             next_request: 1,
             dirty: true,
             paused: false,
@@ -212,7 +217,10 @@ impl SyncEngine {
 
     /// No work left that could make progress on its own.
     pub fn is_idle(&self) -> bool {
-        !self.dirty && self.in_flight.is_empty() && self.wanted.is_empty()
+        !self.dirty
+            && self.in_flight.is_empty()
+            && self.wanted.is_empty()
+            && self.retry_at.is_none()
     }
 
     /// When [`SyncEngine::tick`] must run again even if nothing else happens.
@@ -220,7 +228,13 @@ impl SyncEngine {
         self.in_flight
             .values()
             .map(|r| r.sent + self.config.request_timeout)
+            .chain(self.retry_at)
             .min()
+    }
+
+    fn mark_lacking(&mut self, peer: DeviceId, hash: Hash) {
+        let until = self.clock.now() + self.config.request_timeout;
+        self.lacking.insert((peer, hash), until);
     }
 
     fn send(&self, to: DeviceId, msg: &Message) {
@@ -261,21 +275,28 @@ impl SyncEngine {
         for id in dropped {
             self.in_flight.remove(&id);
         }
-        self.lacking.retain(|(p, _)| *p != peer);
+        self.lacking.retain(|(p, _), _| *p != peer);
         self.dirty = true;
     }
 
     /// Paths changed on disk (from the watcher).
     pub fn on_local_change(&mut self, paths: &[String]) -> Result<()> {
         for p in paths {
-            self.folder.scan(p)?;
+            self.scan(p)?;
         }
-        self.dirty = true;
         Ok(())
     }
 
     pub fn full_scan(&mut self) -> Result<()> {
-        self.folder.scan("")?;
+        self.scan("")
+    }
+
+    /// A local change can turn a version we were waiting on into one we
+    /// must act on (e.g. deleting our side of a conflict makes us the
+    /// loser), so changed paths are planned again.
+    fn scan(&mut self, subtree: &str) -> Result<()> {
+        let stats = self.folder.scan(subtree)?;
+        self.pending.extend(stats.changed);
         self.dirty = true;
         Ok(())
     }
@@ -333,7 +354,7 @@ impl SyncEngine {
                         self.dirty = true;
                     }
                     _ => {
-                        self.lacking.insert((peer, hash));
+                        self.mark_lacking(peer, hash);
                         self.dirty = true;
                     }
                 }
@@ -379,6 +400,8 @@ impl SyncEngine {
             self.pending.extend(self.folder.index().remote_paths()?);
         }
         self.pending.extend(paths);
+        // What they lacked before they may have now.
+        self.lacking.retain(|(p, _), _| *p != peer);
         self.dirty = true;
         Ok(())
     }
@@ -444,7 +467,7 @@ impl SyncEngine {
     fn pick_peer(&self, hash: &Hash, path: &str) -> Result<Option<DeviceId>> {
         let load = |p: &DeviceId| self.in_flight.values().filter(|r| r.peer == *p).count();
         let usable =
-            |p: &DeviceId| self.peers.contains_key(p) && !self.lacking.contains(&(*p, *hash));
+            |p: &DeviceId| self.peers.contains_key(p) && !self.lacking.contains_key(&(*p, *hash));
         let mut candidates: Vec<DeviceId> = self
             .folder
             .index()
@@ -460,6 +483,7 @@ impl SyncEngine {
     }
 
     fn request_chunks(&mut self) {
+        let mut unavailable = VecDeque::new();
         while self.in_flight.len() < self.config.max_in_flight {
             let Some((hash, path)) = self.wanted.pop_front() else {
                 break;
@@ -469,9 +493,14 @@ impl SyncEngine {
             }
             let peer = match self.pick_peer(&hash, &path) {
                 Ok(Some(p)) => p,
-                Ok(None) => continue, // nobody has it now; a later index update retries
+                Ok(None) => {
+                    // Nobody can provide it right now; keep wanting it.
+                    unavailable.push_back((hash, path));
+                    continue;
+                }
                 Err(e) => {
                     tracing::warn!("choosing a peer for a chunk failed: {e}");
+                    unavailable.push_back((hash, path));
                     continue;
                 }
             };
@@ -494,6 +523,11 @@ impl SyncEngine {
                 },
             );
         }
+        self.wanted.extend(unavailable);
+        // Chunks that no connected peer can provide right now: try again
+        // later rather than waiting for an event that may never come.
+        self.retry_at = (!self.wanted.is_empty() && self.in_flight.is_empty())
+            .then(|| self.clock.now() + self.config.request_timeout);
     }
 
     // ----- the main step -----
@@ -511,9 +545,14 @@ impl SyncEngine {
             .collect();
         for id in expired {
             if let Some(r) = self.in_flight.remove(&id) {
-                self.lacking.insert((r.peer, r.hash));
+                self.mark_lacking(r.peer, r.hash);
                 self.dirty = true;
             }
+        }
+        self.lacking.retain(|_, until| *until > now);
+        if self.retry_at.is_some_and(|t| t <= now) {
+            self.retry_at = None;
+            self.dirty = true;
         }
         if self.dirty && !self.paused {
             self.dirty = false;
@@ -542,10 +581,16 @@ impl SyncEngine {
                 let outcome = self.folder.apply(&action, &mut cache, &mut self.totals)?;
                 match outcome {
                     Outcome::Done => progress = true,
+                    Outcome::Stale => {
+                        progress = true;
+                        still_pending.insert(path);
+                    }
                     Outcome::LocalChanged => {
-                        if !self.folder.scan(&path)?.changed.is_empty() {
+                        let changed = self.folder.scan(&path)?.changed;
+                        if !changed.is_empty() {
                             progress = true;
                         }
+                        still_pending.extend(changed);
                         still_pending.insert(path);
                     }
                     Outcome::MissingChunks(hashes) => {

@@ -197,6 +197,21 @@ impl Index {
         Ok(id)
     }
 
+    /// A counter value for this device's next local change: above every
+    /// value it handed out before (for any path) and at least `floor`.
+    /// Version vectors may be replaced by peers' records that lack our
+    /// latest counter; drawing counters from here keeps each of our
+    /// versions uniquely numbered anyway.
+    pub fn next_own_counter(&self, floor: u64) -> Result<u64> {
+        let last = self
+            .meta("own_counter")?
+            .and_then(|v| <[u8; 8]>::try_from(v.as_slice()).ok())
+            .map_or(0, u64::from_le_bytes);
+        let next = (last + 1).max(floor);
+        self.set_meta("own_counter", &next.to_le_bytes())?;
+        Ok(next)
+    }
+
     // ----- local records -----
 
     pub fn max_seq(&self) -> Result<u64> {
@@ -537,6 +552,15 @@ mod tests {
         let idx = Index::open(&dir).unwrap();
         assert_eq!(idx.index_id_or_init(|| 7).unwrap(), 42);
         assert_eq!(idx.max_seq().unwrap(), 1);
+    }
+
+    #[test]
+    fn own_counter_is_monotonic() {
+        let idx = Index::open_in_memory().unwrap();
+        assert_eq!(idx.next_own_counter(0).unwrap(), 1);
+        assert_eq!(idx.next_own_counter(0).unwrap(), 2);
+        assert_eq!(idx.next_own_counter(100).unwrap(), 100);
+        assert_eq!(idx.next_own_counter(50).unwrap(), 101);
     }
 
     #[test]

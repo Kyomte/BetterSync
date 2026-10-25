@@ -47,6 +47,19 @@ impl VersionVector {
         out
     }
 
+    /// The vector after a local change on `device`, with the device's
+    /// counter raised to at least `floor`. Passing the current Unix time in
+    /// seconds keeps counters fresh even if a device lost its index and
+    /// would otherwise reuse counter values others have already seen. This
+    /// only picks a counter value; it never decides ordering.
+    #[must_use]
+    pub fn incremented_at_least(&self, device: DeviceId, floor: u64) -> Self {
+        let mut out = self.clone();
+        let e = out.0.entry(device).or_insert(0);
+        *e = (*e + 1).max(floor);
+        out
+    }
+
     /// Element-wise maximum: a version that has seen both.
     #[must_use]
     pub fn merged(&self, other: &Self) -> Self {
