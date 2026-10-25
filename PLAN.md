@@ -140,7 +140,7 @@ Legend: 🐧 = fully verifiable on Linux / in a cloud session. 💻 = needs a ma
 
 **Done when:** integration test: create/modify/rename/delete in a temp dir updates the index within debounce + 500 ms. 💻 check on Windows & macOS that editor "safe saves" (VS Code, Word) are handled.
 
-### M3 — Local one-way sync (in-process) 🐧
+### M3 — Local one-way sync (in-process) 🐧 ✅
 - `core` sync planner: given local index + remote index → list of actions (fetch, delete, mkdir, conflict).
 - `engine`: applies actions with atomic writes + versions folder, fetching chunks through a trait (in-process implementation reads from the source folder).
 

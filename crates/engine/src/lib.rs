@@ -2,6 +2,8 @@
 //! with an injected file system and transport so the simulator can drive it.
 
 mod error;
+pub mod folder;
 pub mod scan;
 
 pub use error::{EngineError, Result};
+pub use folder::{ChunkSource, Clock, Folder, NoChunks, Outcome, SyncStats, SystemClock};
