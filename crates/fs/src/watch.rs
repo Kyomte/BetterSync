@@ -108,6 +108,9 @@ impl FolderWatcher {
             let on_event = on_event.clone();
             move |result: DebounceEventResult| match result {
                 Ok(events) => {
+                    for e in &events {
+                        tracing::debug!(kind = ?e.kind, paths = ?e.paths, "fs event");
+                    }
                     // A rename reported with only one of its two paths
                     // (FSEvents does this) hides where the file went or came
                     // from; only a full rescan finds the other side. Rescans

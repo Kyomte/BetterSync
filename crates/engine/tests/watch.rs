@@ -26,6 +26,11 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
+        // Raw OS events are logged at debug level; shown when a test fails.
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("bsync_fs=debug")
+            .with_test_writer()
+            .try_init();
         let root = tempfile::tempdir().unwrap();
         let mut index = Index::open_in_memory().unwrap();
         scan(&ctx(root.path()), &mut index, "").unwrap();
@@ -56,12 +61,23 @@ impl Harness {
     /// takes longer than debounce + 500 ms from `start`.
     fn wait_until(&mut self, start: Instant, what: &str, done: impl Fn(&Index) -> bool) {
         let deadline = start + DEBOUNCE + Duration::from_millis(500);
+        let mut seen = Vec::new();
         while !done(&self.index) {
             let now = Instant::now();
-            assert!(now < deadline, "index not updated in time: {what}");
+            if now >= deadline {
+                let index: Vec<_> = self
+                    .index
+                    .all()
+                    .unwrap()
+                    .into_iter()
+                    .map(|e| (e.record.path, e.record.deleted))
+                    .collect();
+                panic!("index not updated in time: {what}\nevents: {seen:?}\nindex: {index:?}");
+            }
             let Ok(event) = self.events.recv_timeout(deadline - now) else {
                 continue;
             };
+            seen.push(event.clone());
             let root = self.root.path().to_path_buf();
             match event {
                 WatchEvent::Paths(paths) => {
