@@ -154,7 +154,7 @@ mod tests {
     fn relative_paths_dedupes_and_filters() {
         let root = PathBuf::from("/r");
         let got = relative_paths(
-            &[root.clone()],
+            std::slice::from_ref(&root),
             [
                 root.join("a/b"),
                 root.join("a"),
@@ -167,7 +167,7 @@ mod tests {
         );
         assert_eq!(got, vec!["a", "ab"]);
         assert_eq!(
-            relative_paths(&[root.clone()], [root.clone(), root.join("q")]),
+            relative_paths(std::slice::from_ref(&root), [root.clone(), root.join("q")]),
             vec![""]
         );
     }

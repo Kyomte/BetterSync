@@ -1,5 +1,7 @@
 //! M2: changes in a real directory reach the index within debounce + 500 ms.
 
+#![allow(clippy::unwrap_used)]
+
 use std::path::Path;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
