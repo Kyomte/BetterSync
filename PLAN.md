@@ -118,7 +118,7 @@ Each milestone should fit in **one session** and end with green tests. Do them i
 
 Legend: 🐧 = fully verifiable on Linux / in a cloud session. 💻 = needs a manual check on the user's Windows/Mac machines (CI covers compile + unit tests only).
 
-### M0 — Workspace, CI, simulator skeleton 🐧
+### M0 — Workspace, CI, simulator skeleton 🐧 ✅
 - Cargo workspace with the crate layout above (empty crates compile).
 - `rust-toolchain.toml` (stable), `rustfmt.toml`, clippy config.
 - GitHub Actions matrix: `ubuntu-latest`, `windows-latest`, `macos-latest` running `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --workspace`.
@@ -126,7 +126,7 @@ Legend: 🐧 = fully verifiable on Linux / in a cloud session. 💻 = needs a ma
 
 **Done when:** CI is green on all three OSes; `cargo test --workspace` passes locally.
 
-### M1 — Scanner, chunker, index 🐧
+### M1 — Scanner, chunker, index 🐧 ✅
 - `fs`: recursive scan producing file records (skip `.bsync/`).
 - `core`: FastCDC chunking (`fastcdc` crate) + BLAKE3 (`blake3` crate).
 - `index`: SQLite schema + migrations; store/update records and chunk lists; local sequence numbers.

@@ -13,6 +13,10 @@ bsync-index.workspace = true
 bsync-fs.workspace = true
 bsync-proto.workspace = true
 bsync-net.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

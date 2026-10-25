@@ -13,6 +13,24 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::SystemTime;
 
+mod walk;
+
+pub use walk::{WalkEntry, WalkResult, is_internal, rel_to_path, walk};
+
+/// BetterSync's own directory at the root of every synced folder.
+pub const BSYNC_DIR: &str = ".bsync";
+
+/// Prefix of temporary files written next to their final location.
+pub const TEMP_PREFIX: &str = ".bsync-tmp-";
+
+/// Nanoseconds since the Unix epoch (negative before it).
+pub fn mtime_ns(t: SystemTime) -> i64 {
+    match t.duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(d) => i64::try_from(d.as_nanos()).unwrap_or(i64::MAX),
+        Err(e) => -i64::try_from(e.duration().as_nanos()).unwrap_or(i64::MAX),
+    }
+}
+
 /// What kind of entry a path refers to. Symlinks are not followed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileKind {
