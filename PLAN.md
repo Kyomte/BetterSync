@@ -173,7 +173,7 @@ Legend: 🐧 = fully verifiable on Linux / in a cloud session. 💻 = needs a ma
 
 **Done when:** two daemons on the same machine find each other via mDNS (🐧 where multicast works). 💻 PC ↔ Mac on Wi-Fi, then over Tailscale with one device on phone hotspot.
 
-### M8 — Robustness & platform rules 🐧/💻
+### M8 — Robustness & platform rules 🐧/💻 ✅
 - Resumable pulls (persist fetched chunks), ignore file (`.bsyncignore`, gitignore syntax via `ignore` crate), path normalisation + case-collision detection, Windows reserved names, locked-file retry, versions folder cleanup policy.
 
 **Done when:** tests for each rule; 💻 Windows ↔ macOS case/Unicode collision manual check.

@@ -446,11 +446,11 @@ impl EngineThread {
                 }
             }
             for f in &mut self.folders {
-                if let Some(e) = f.engine.as_mut() {
-                    if let Err(err) = e.tick() {
-                        tracing::error!(folder = %f.config.id, "sync error: {err}");
-                        f.error = Some(err.to_string());
-                    }
+                if let Some(e) = f.engine.as_mut()
+                    && let Err(err) = e.tick()
+                {
+                    tracing::error!(folder = %f.config.id, "sync error: {err}");
+                    f.error = Some(err.to_string());
                 }
             }
         }
@@ -464,10 +464,10 @@ impl EngineThread {
                     self.peers_seen.insert(peer, (name, addr));
                 }
                 for f in &mut self.folders {
-                    if let Some(e) = f.engine.as_mut() {
-                        if let Err(err) = e.on_connected(peer) {
-                            tracing::error!("on_connected: {err}");
-                        }
+                    if let Some(e) = f.engine.as_mut()
+                        && let Err(err) = e.on_connected(peer)
+                    {
+                        tracing::error!("on_connected: {err}");
                     }
                 }
             }
@@ -487,10 +487,10 @@ impl EngineThread {
                     if f.config.id != folder.0 {
                         continue;
                     }
-                    if let Some(e) = f.engine.as_mut() {
-                        if let Err(err) = e.on_message(peer, msg) {
-                            tracing::error!(folder = %f.config.id, "message error: {err}");
-                        }
+                    if let Some(e) = f.engine.as_mut()
+                        && let Err(err) = e.on_message(peer, msg)
+                    {
+                        tracing::error!(folder = %f.config.id, "message error: {err}");
                     }
                     return;
                 }

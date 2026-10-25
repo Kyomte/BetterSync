@@ -4,6 +4,7 @@
 
 use std::path::Path;
 
+use bsync_core::names::case_key;
 use bsync_core::{DeviceId, FileRecord, Hash};
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -50,6 +51,9 @@ const MIGRATIONS: &[&str] = &[
          index_id INTEGER NOT NULL,
          max_seq INTEGER NOT NULL
      );",
+    // 2: case-insensitive lookup key (filled in by `fill_case_keys`)
+    "ALTER TABLE files ADD COLUMN case_key TEXT;
+     CREATE INDEX files_by_case_key ON files (case_key);",
 ];
 
 /// Size and mtime of the file on this device's disk when it was last
@@ -119,6 +123,7 @@ impl Index {
         conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
         let mut index = Self { conn };
         index.migrate()?;
+        index.fill_case_keys()?;
         Ok(index)
     }
 
@@ -137,6 +142,39 @@ impl Index {
             tx.commit()?;
         }
         Ok(())
+    }
+
+    /// Rows written before migration 2 have no case key yet.
+    fn fill_case_keys(&mut self) -> Result<()> {
+        let paths: Vec<String> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT path FROM files WHERE case_key IS NULL")?;
+            stmt.query_map([], |r| r.get(0))?
+                .collect::<Result<_, _>>()?
+        };
+        for p in paths {
+            self.conn.execute(
+                "UPDATE files SET case_key = ?2 WHERE path = ?1",
+                params![p, case_key(&p)],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Live local entries whose path equals `path` ignoring case and
+    /// Unicode form.
+    pub fn same_case_key(&self, path: &str) -> Result<Vec<LocalEntry>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT seq, record, local_size, local_mtime_ns FROM files WHERE case_key = ?1",
+        )?;
+        let rows = stmt.query_map([case_key(path)], row_to_parts)?;
+        Ok(rows
+            .map(|r| parts_to_entry(r?))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|e| !e.record.deleted)
+            .collect())
     }
 
     pub fn schema_version(&self) -> Result<i64> {
@@ -187,10 +225,10 @@ impl Index {
 
     /// This index's incarnation ID, created from `new_id` on first use.
     pub fn index_id_or_init(&self, new_id: impl FnOnce() -> u64) -> Result<u64> {
-        if let Some(v) = self.meta("index_id")? {
-            if let Ok(bytes) = <[u8; 8]>::try_from(v.as_slice()) {
-                return Ok(u64::from_le_bytes(bytes));
-            }
+        if let Some(v) = self.meta("index_id")?
+            && let Ok(bytes) = <[u8; 8]>::try_from(v.as_slice())
+        {
+            return Ok(u64::from_le_bytes(bytes));
         }
         let id = new_id();
         self.set_meta("index_id", &id.to_le_bytes())?;
@@ -238,8 +276,8 @@ impl Index {
     pub fn put(&self, record: &FileRecord, stat: Option<LocalStat>) -> Result<u64> {
         let seq = self.max_seq()? + 1;
         self.conn.execute(
-            "INSERT INTO files (path, seq, record, local_size, local_mtime_ns)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO files (path, seq, record, local_size, local_mtime_ns, case_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT (path) DO UPDATE SET seq = excluded.seq, record = excluded.record,
                  local_size = excluded.local_size, local_mtime_ns = excluded.local_mtime_ns",
             params![
@@ -248,6 +286,7 @@ impl Index {
                 encode(record)?,
                 stat.map(|s| to_i64(s.size)),
                 stat.map(|s| s.mtime_ns),
+                case_key(&record.path),
             ],
         )?;
         self.conn
@@ -502,6 +541,19 @@ mod tests {
             .collect();
         assert_eq!(since, vec!["b", "a"]);
         assert_eq!(idx.all().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn case_key_lookup() {
+        let idx = Index::open_in_memory().unwrap();
+        idx.put(&file("Docs/Report.TXT", &[]), None).unwrap();
+        let mut dead = file("docs/x", &[]);
+        dead.deleted = true;
+        idx.put(&dead, None).unwrap();
+        let hits = idx.same_case_key("docs/report.txt").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].record.path, "Docs/Report.TXT");
+        assert!(idx.same_case_key("docs/x").unwrap().is_empty());
     }
 
     #[test]

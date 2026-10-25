@@ -31,6 +31,10 @@ pub struct EngineConfig {
     pub shared_with: BTreeSet<DeviceId>,
     pub max_in_flight: usize,
     pub request_timeout: Duration,
+    /// Old versions in `.bsync/versions/` are removed after this long...
+    pub versions_max_age: Duration,
+    /// ...or, oldest first, while they take more than this many bytes.
+    pub versions_max_bytes: u64,
 }
 
 impl EngineConfig {
@@ -40,6 +44,8 @@ impl EngineConfig {
             shared_with: shared_with.into_iter().collect(),
             max_in_flight: 32,
             request_timeout: Duration::from_secs(30),
+            versions_max_age: Duration::from_secs(30 * 24 * 3600),
+            versions_max_bytes: 10 * 1024 * 1024 * 1024,
         }
     }
 }
@@ -66,6 +72,8 @@ pub struct EngineStatus {
     /// Paths that still need work.
     pub pending: usize,
     pub in_flight: usize,
+    /// Chunks requested from peers since the engine started.
+    pub chunks_requested: u64,
     /// Paths that cannot be synced right now, with the reason.
     pub blocked: Vec<(String, String)>,
     pub totals: SyncStats,
@@ -115,8 +123,13 @@ pub struct SyncEngine {
     /// Peers that recently could not provide a chunk, until when to avoid
     /// asking them again.
     lacking: BTreeMap<(DeviceId, Hash), SystemTime>,
-    /// Work is stalled on chunks nobody could provide; try again then.
+    /// Work is stalled (chunks nobody could provide, paths that failed);
+    /// try again then.
     retry_at: Option<SystemTime>,
+    /// Paths whose last attempt failed with an I/O error (e.g. the file is
+    /// locked by another program): failures so far, and when to retry.
+    failing: BTreeMap<String, (u32, SystemTime)>,
+    chunks_requested: u64,
     next_request: u64,
     /// Something happened that may let pending work proceed.
     dirty: bool,
@@ -160,6 +173,8 @@ impl SyncEngine {
             in_flight: BTreeMap::new(),
             lacking: BTreeMap::new(),
             retry_at: None,
+            failing: BTreeMap::new(),
+            chunks_requested: 0,
             next_request: 1,
             dirty: true,
             paused: false,
@@ -210,6 +225,7 @@ impl SyncEngine {
             connected: self.peers.keys().copied().collect(),
             pending: self.pending.len(),
             in_flight: self.in_flight.len(),
+            chunks_requested: self.chunks_requested,
             blocked: self.blocked.clone(),
             totals: self.totals.clone(),
         }
@@ -287,8 +303,17 @@ impl SyncEngine {
         Ok(())
     }
 
+    /// Rescan everything (at startup and periodically) and prune old
+    /// versions.
     pub fn full_scan(&mut self) -> Result<()> {
-        self.scan("")
+        self.scan("")?;
+        let removed = self
+            .folder
+            .clean_versions(self.config.versions_max_age, self.config.versions_max_bytes)?;
+        if removed > 0 {
+            tracing::info!(folder = %self.config.folder_id, removed, "pruned old versions");
+        }
+        Ok(())
     }
 
     /// A local change can turn a version we were waiting on into one we
@@ -488,7 +513,8 @@ impl SyncEngine {
             let Some((hash, path)) = self.wanted.pop_front() else {
                 break;
             };
-            if self.in_flight.values().any(|r| r.hash == hash) {
+            // Already on its way, or arrived since it was queued.
+            if self.in_flight.values().any(|r| r.hash == hash) || self.cache().has(&hash) {
                 continue;
             }
             let peer = match self.pick_peer(&hash, &path) {
@@ -506,6 +532,7 @@ impl SyncEngine {
             };
             let id = self.next_request;
             self.next_request += 1;
+            self.chunks_requested += 1;
             self.in_flight.insert(
                 id,
                 Request {
@@ -524,10 +551,16 @@ impl SyncEngine {
             );
         }
         self.wanted.extend(unavailable);
-        // Chunks that no connected peer can provide right now: try again
-        // later rather than waiting for an event that may never come.
-        self.retry_at = (!self.wanted.is_empty() && self.in_flight.is_empty())
+        self.update_retry();
+    }
+
+    /// When to try again without any outside event: chunks no connected
+    /// peer could provide, and paths backing off after errors.
+    fn update_retry(&mut self) {
+        let chunks = (!self.wanted.is_empty() && self.in_flight.is_empty())
             .then(|| self.clock.now() + self.config.request_timeout);
+        let failures = self.failing.values().map(|(_, at)| *at).min();
+        self.retry_at = chunks.into_iter().chain(failures).min();
     }
 
     // ----- the main step -----
@@ -562,6 +595,13 @@ impl SyncEngine {
     }
 
     fn pull(&mut self) -> Result<()> {
+        // The rules may have arrived by sync, or changed on disk.
+        self.folder.refresh_ignore()?;
+        if self.folder.take_ignore_changed() {
+            self.pending.extend(self.folder.index().remote_paths()?);
+            self.scan("")?;
+            self.folder.take_ignore_changed();
+        }
         let mut wanted: Vec<(Hash, String)> = Vec::new();
         loop {
             let mut actions = Vec::new();
@@ -575,10 +615,35 @@ impl SyncEngine {
             let mut progress = false;
             wanted.clear();
             self.blocked.clear();
+            let now = self.clock.now();
             for action in actions {
                 let path = action.record().path.clone();
+                if let Some((n, at)) = self.failing.get(&path)
+                    && *at > now
+                {
+                    self.blocked
+                        .push((path.clone(), format!("failed {n} time(s); retrying")));
+                    still_pending.insert(path);
+                    continue;
+                }
                 let mut cache = self.cache();
-                let outcome = self.folder.apply(&action, &mut cache, &mut self.totals)?;
+                let outcome = match self.folder.apply(&action, &mut cache, &mut self.totals) {
+                    Ok(o) => {
+                        self.failing.remove(&path);
+                        o
+                    }
+                    // One path's trouble (a locked file, a full disk, a
+                    // permission problem) must not stop the others.
+                    Err(EngineError::Io(e)) => {
+                        let n = self.failing.get(&path).map_or(0, |f| f.0) + 1;
+                        let wait =
+                            Duration::from_secs(1u64 << n.min(8)).min(Duration::from_secs(300));
+                        tracing::warn!(%path, "could not apply (attempt {n}), retrying in {wait:?}: {e}");
+                        self.failing.insert(path.clone(), (n, now + wait));
+                        Outcome::Blocked(format!("{e}"))
+                    }
+                    Err(e) => return Err(e),
+                };
                 match outcome {
                     Outcome::Done => progress = true,
                     Outcome::Stale => {
@@ -612,7 +677,8 @@ impl SyncEngine {
         let known: BTreeSet<Hash> = wanted.iter().map(|(h, _)| *h).collect();
         self.wanted.retain(|(h, _)| known.contains(h));
         for (h, p) in wanted {
-            if !self.wanted.iter().any(|(w, _)| *w == h) {
+            let requested = self.in_flight.values().any(|r| r.hash == h);
+            if !requested && !self.wanted.iter().any(|(w, _)| *w == h) {
                 self.wanted.push_back((h, p));
             }
         }
@@ -620,6 +686,8 @@ impl SyncEngine {
             self.lacking.clear();
             self.clear_chunk_cache()?;
         }
+        let pending = &self.pending;
+        self.failing.retain(|p, _| pending.contains(p));
         self.request_chunks();
         Ok(())
     }

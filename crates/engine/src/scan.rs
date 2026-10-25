@@ -7,6 +7,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use bsync_core::names::to_nfc;
 use bsync_core::{ChunkParams, DeviceId, EntryKind, FileRecord, Hash, chunk_reader};
 use bsync_fs::{FileKind, FileSystem, Metadata, WalkEntry, mtime_ns, rel_to_path, walk};
 use bsync_index::{Index, LocalEntry, LocalStat};
@@ -42,6 +43,11 @@ pub struct ScanStats {
     pub hashed_bytes: u64,
     /// Paths whose local record got a new version.
     pub changed: Vec<String>,
+    /// `(record path, on-disk path)` for walked entries whose on-disk name
+    /// is not in NFC (e.g. NFD names from macOS).
+    pub disk_names: Vec<(String, String)>,
+    /// On-disk paths left out because another entry has the same NFC name.
+    pub collisions: Vec<String>,
 }
 
 pub fn stat_of(meta: &Metadata) -> LocalStat {
@@ -118,6 +124,7 @@ pub fn hash_file(
 fn update_entry(
     ctx: &ScanContext<'_>,
     index: &Index,
+    path: &str,
     entry: &WalkEntry,
     existing: Option<&LocalEntry>,
     stats: &mut ScanStats,
@@ -130,7 +137,7 @@ fn update_entry(
             }
             let mut r = new_version(
                 prev,
-                &entry.path,
+                path,
                 ctx.device,
                 index.next_own_counter(ctx.counter_floor)?,
             );
@@ -141,24 +148,26 @@ fn update_entry(
         }
         FileKind::File => {
             let stat = stat_of(&entry.metadata);
-            if let Some(e) = existing {
-                if e.record.is_live_file() && e.stat == Some(stat) {
-                    return Ok(false);
-                }
+            if let Some(e) = existing
+                && e.record.is_live_file()
+                && e.stat == Some(stat)
+            {
+                return Ok(false);
             }
             let Some((chunked, meta)) = hash_file(ctx, &entry.path, &entry.metadata, stats)? else {
                 return Ok(false);
             };
-            if let Some(e) = existing {
-                if e.record.is_live_file() && e.record.hash == chunked.hash {
-                    // Touched but not changed.
-                    index.set_stat(&entry.path, Some(stat_of(&meta)))?;
-                    return Ok(false);
-                }
+            if let Some(e) = existing
+                && e.record.is_live_file()
+                && e.record.hash == chunked.hash
+            {
+                // Touched but not changed.
+                index.set_stat(path, Some(stat_of(&meta)))?;
+                return Ok(false);
             }
             let mut r = new_version(
                 prev,
-                &entry.path,
+                path,
                 ctx.device,
                 index.next_own_counter(ctx.counter_floor)?,
             );
@@ -174,8 +183,8 @@ fn update_entry(
     }
 }
 
-/// Scan `subtree` (relative path, `""` for the whole folder) and record
-/// local changes in `index`.
+/// Scan `subtree` (relative on-disk path, `""` for the whole folder) and
+/// record local changes in `index`. Records use NFC paths.
 pub fn scan(ctx: &ScanContext<'_>, index: &mut Index, subtree: &str) -> Result<ScanStats> {
     let walked = match walk(ctx.fs, ctx.root, subtree, ctx.skip) {
         Ok(w) => w,
@@ -201,9 +210,10 @@ pub fn scan(ctx: &ScanContext<'_>, index: &mut Index, subtree: &str) -> Result<S
                         path: dir.to_owned(),
                         metadata,
                     };
-                    let existing = index.get(dir)?;
-                    if update_entry(ctx, index, &entry, existing.as_ref(), &mut stats)? {
-                        stats.changed.push(dir.to_owned());
+                    let path = to_nfc(dir);
+                    let existing = index.get(&path)?;
+                    if update_entry(ctx, index, &path, &entry, existing.as_ref(), &mut stats)? {
+                        stats.changed.push(path);
                     }
                 }
                 _ => break,
@@ -211,15 +221,26 @@ pub fn scan(ctx: &ScanContext<'_>, index: &mut Index, subtree: &str) -> Result<S
         }
         let mut seen = BTreeSet::new();
         for entry in &walked.entries {
-            seen.insert(entry.path.as_str());
-            let existing = index.get(&entry.path)?;
-            if update_entry(ctx, index, entry, existing.as_ref(), &mut stats)? {
-                tracing::debug!(device = ?ctx.device, path = %entry.path, "scan: changed");
-                stats.changed.push(entry.path.clone());
+            let path = to_nfc(&entry.path);
+            if !seen.insert(path.clone()) {
+                tracing::warn!(path = %entry.path, "another file has the same name in a different Unicode form; not synced");
+                stats.collisions.push(entry.path.clone());
+                continue;
+            }
+            if path != entry.path {
+                stats.disk_names.push((path.clone(), entry.path.clone()));
+            }
+            let existing = index.get(&path)?;
+            if update_entry(ctx, index, &path, entry, existing.as_ref(), &mut stats)? {
+                tracing::debug!(device = ?ctx.device, path = %path, "scan: changed");
+                stats.changed.push(path);
             }
         }
+        let subtree = to_nfc(subtree);
+        let subtree = subtree.as_str();
         let unreadable = |path: &str| {
             walked.errors.iter().any(|(dir, _)| {
+                let dir = to_nfc(dir);
                 dir.is_empty() || path == dir || path.starts_with(&format!("{dir}/"))
             })
         };

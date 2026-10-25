@@ -13,9 +13,11 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::SystemTime;
 
+mod ignore_rules;
 mod walk;
 mod watch;
 
+pub use ignore_rules::{IGNORE_FILE, IgnoreRules};
 pub use walk::{WalkEntry, WalkResult, is_internal, rel_to_path, walk};
 pub use watch::{FolderWatcher, WatchConfig, WatchEvent, relative_paths};
 

@@ -205,10 +205,8 @@ impl Run {
                     } else {
                         self.fs(n).remove_dir(&p).is_ok()
                     };
-                    if ok {
-                        if let Some(d) = v {
-                            self.superseded.insert(d.to_vec());
-                        }
+                    if ok && let Some(d) = v {
+                        self.superseded.insert(d.to_vec());
                     }
                 }
                 let _ = self.fs(n).remove_dir(&Cluster::path(dir));

@@ -8,6 +8,7 @@
 pub mod chunk;
 mod hash;
 mod id;
+pub mod names;
 pub mod plan;
 mod record;
 mod time;

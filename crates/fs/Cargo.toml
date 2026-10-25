@@ -12,6 +12,7 @@ bsync-core.workspace = true
 notify.workspace = true
 notify-debouncer-full.workspace = true
 tracing.workspace = true
+ignore.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

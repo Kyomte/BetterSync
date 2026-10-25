@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use notify::event::ModifyKind;
 use notify::{EventKind, RecursiveMode};
-use notify_debouncer_full::{DebounceEventResult, new_debouncer};
+use notify_debouncer_full::{DebounceEventResult, NoCache, new_debouncer_opt};
 
 use crate::is_internal;
 
@@ -98,10 +98,10 @@ impl FolderWatcher {
         // Events may name either the path as given or its canonical form
         // (e.g. /var → /private/var on macOS).
         let mut roots = vec![root.to_path_buf()];
-        if let Ok(c) = root.canonicalize() {
-            if c != root {
-                roots.push(c);
-            }
+        if let Ok(c) = root.canonicalize()
+            && c != root
+        {
+            roots.push(c);
         }
         let on_event = std::sync::Arc::new(on_event);
         let handler = {
@@ -137,7 +137,17 @@ impl FolderWatcher {
                 }
             }
         };
-        let mut debouncer = new_debouncer(config.debounce, None, handler)?;
+        // No file-ID cache: with it, the debouncer "stitches" FSEvents
+        // renames into a bare Create of the new name and drops the old one
+        // (seen on macOS CI). Without it renames arrive as Name events,
+        // handled above. inotify and Windows report both names anyway.
+        let mut debouncer = new_debouncer_opt::<_, notify::RecommendedWatcher, _>(
+            config.debounce,
+            None,
+            handler,
+            NoCache,
+            notify::Config::default(),
+        )?;
         debouncer.watch(root, RecursiveMode::Recursive)?;
 
         let (stop_timer, stopped) = mpsc::channel::<()>();

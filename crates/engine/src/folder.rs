@@ -11,16 +11,21 @@
 //!    change can be scanned and re-planned.
 //! 4. A version that loses a conflict is kept as a conflict copy.
 
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use bsync_core::names::{to_nfc, windows_path_problem};
 use bsync_core::plan::{Action, apply_order, conflict_copy_path, plan_path};
 use bsync_core::{
     ChunkParams, ChunkRef, DeviceId, EntryKind, FileRecord, Hash, chunk_reader, format_utc_compact,
 };
-use bsync_fs::{BSYNC_DIR, FileKind, FileSystem, Metadata, TEMP_PREFIX, mtime_ns, rel_to_path};
+use bsync_fs::{
+    BSYNC_DIR, FileKind, FileSystem, IGNORE_FILE, IgnoreRules, Metadata, TEMP_PREFIX, mtime_ns,
+    rel_to_path,
+};
 use bsync_index::{Index, LocalEntry};
 
 use crate::scan::{ScanContext, ScanStats, new_version, stat_of};
@@ -98,6 +103,13 @@ pub struct Folder {
     index: Index,
     skip: Box<SkipFn>,
     temp_counter: u64,
+    /// `.bsyncignore` rules, reloaded on every scan.
+    ignore: IgnoreRules,
+    ignore_changed: bool,
+    /// Refuse names Windows cannot store (on by default on Windows).
+    windows_rules: bool,
+    /// Record path (NFC) → on-disk path, where they differ.
+    disk_names: BTreeMap<String, String>,
 }
 
 impl std::fmt::Debug for Folder {
@@ -154,7 +166,39 @@ impl Folder {
             index,
             skip: Box::new(|_, _| false),
             temp_counter: 0,
+            ignore: IgnoreRules::default(),
+            ignore_changed: false,
+            windows_rules: cfg!(windows),
+            disk_names: BTreeMap::new(),
         }
+    }
+
+    /// Apply Windows' file-name rules to incoming paths (on by default only
+    /// on Windows; tests turn it on elsewhere).
+    pub fn set_windows_rules(&mut self, on: bool) {
+        self.windows_rules = on;
+    }
+
+    /// Reload `.bsyncignore` if it changed. Returns whether it did; the
+    /// caller must then re-plan everything and rescan, since paths may have
+    /// become (un)ignored.
+    pub fn refresh_ignore(&mut self) -> Result<bool> {
+        let changed = self.ignore.refresh(&*self.fs, &self.root)?;
+        if changed {
+            tracing::info!(root = %self.root.display(), "{IGNORE_FILE} changed");
+            self.ignore_changed = true;
+        }
+        Ok(changed)
+    }
+
+    /// Whether the rules changed since the last call.
+    pub fn take_ignore_changed(&mut self) -> bool {
+        std::mem::take(&mut self.ignore_changed)
+    }
+
+    /// Whether `.bsyncignore` excludes `rel` (a record path).
+    pub fn is_ignored(&self, rel: &str, is_dir: bool) -> bool {
+        self.ignore.is_ignored(rel, is_dir)
     }
 
     /// Leave out paths for which `skip` returns true (ignore rules).
@@ -204,26 +248,151 @@ impl Folder {
         Ok(self.index.next_own_counter(self.counter_floor())?)
     }
 
+    /// Absolute on-disk path of record path `rel`. Usually the same name;
+    /// differs where the disk holds a non-NFC form of it (or of a parent).
     pub fn abs(&self, rel: &str) -> PathBuf {
-        rel_to_path(&self.root, rel)
+        rel_to_path(&self.root, &self.disk_rel(rel))
     }
 
-    /// Whether `rel` is excluded from syncing.
+    fn disk_rel(&self, rel: &str) -> String {
+        if self.disk_names.is_empty() {
+            return rel.to_owned();
+        }
+        if let Some(d) = self.disk_names.get(rel) {
+            return d.clone();
+        }
+        // A new entry inside a directory whose disk name differs.
+        let mut cur = rel;
+        while let Some(parent) = bsync_core::parent_of(cur) {
+            if let Some(d) = self.disk_names.get(parent) {
+                return format!("{d}{}", &rel[parent.len()..]);
+            }
+            cur = parent;
+        }
+        rel.to_owned()
+    }
+
+    /// Whether `rel` (a record path) is excluded from syncing.
     pub fn is_skipped(&self, rel: &str, meta: &Metadata) -> bool {
-        (self.skip)(rel, meta)
+        self.ignore.is_ignored(rel, meta.kind == FileKind::Dir) || (self.skip)(rel, meta)
     }
 
-    /// Scan `subtree` (`""` = everything) for local changes.
+    /// Scan `subtree` (`""` = everything) for local changes. `subtree` may
+    /// be a record path or an on-disk path (as file watchers report them).
     pub fn scan(&mut self, subtree: &str) -> Result<ScanStats> {
+        self.refresh_ignore()?;
+        let disk_subtree = self
+            .disk_names
+            .get(subtree)
+            .cloned()
+            .unwrap_or_else(|| subtree.to_owned());
+        let ignore = &self.ignore;
+        let extra = &self.skip;
+        let skip = |rel: &str, meta: &Metadata| {
+            ignore.is_ignored(&to_nfc(rel), meta.kind == FileKind::Dir) || extra(rel, meta)
+        };
         let ctx = ScanContext {
             fs: &*self.fs,
             root: &self.root,
             device: self.device,
             counter_floor: self.counter_floor(),
             params: self.params,
-            skip: &*self.skip,
+            skip: &skip,
         };
-        crate::scan::scan(&ctx, &mut self.index, subtree)
+        let stats = crate::scan::scan(&ctx, &mut self.index, &disk_subtree)?;
+        let nfc_subtree = to_nfc(subtree);
+        self.disk_names.retain(|k, _| {
+            !(nfc_subtree.is_empty()
+                || *k == nfc_subtree
+                || k.starts_with(&format!("{nfc_subtree}/")))
+        });
+        self.disk_names.extend(stats.disk_names.iter().cloned());
+        Ok(stats)
+    }
+
+    /// Why an incoming entry at `path` cannot be created here, if it can't:
+    /// names Windows cannot store, and names that only differ in case or
+    /// Unicode form from an existing local entry (or one of its parents) —
+    /// on a case-insensitive file system they would be the same file.
+    fn name_problem(&self, path: &str) -> Result<Option<String>> {
+        if self.windows_rules
+            && let Some(why) = windows_path_problem(path)
+        {
+            return Ok(Some(why));
+        }
+        let mut prefixes = vec![path];
+        let mut cur = path;
+        while let Some(p) = bsync_core::parent_of(cur) {
+            prefixes.push(p);
+            cur = p;
+        }
+        for prefix in prefixes {
+            for other in self.index.same_case_key(prefix)? {
+                if other.record.path != prefix {
+                    return Ok(Some(format!(
+                        "{prefix:?} differs from existing {:?} only in case or Unicode form",
+                        other.record.path
+                    )));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Remove old versions from `.bsync/versions/`: anything older than
+    /// `max_age`, then the oldest until at most `max_bytes` remain. Returns
+    /// how many files were removed.
+    pub fn clean_versions(&self, max_age: std::time::Duration, max_bytes: u64) -> Result<usize> {
+        let root = format!("{BSYNC_DIR}/versions");
+        let mut files = Vec::new(); // (timestamp, size, rel)
+        let mut dirs = vec![root];
+        while let Some(dir) = dirs.pop() {
+            let listing = match self.fs.read_dir(&rel_to_path(&self.root, &dir)) {
+                Ok(l) => l,
+                Err(e) if not_found(&e) => continue,
+                Err(e) => return Err(e.into()),
+            };
+            for e in listing {
+                let name = e.name.to_string_lossy().into_owned();
+                let rel = format!("{dir}/{name}");
+                match e.metadata.kind {
+                    FileKind::Dir => dirs.push(rel),
+                    FileKind::File => {
+                        // The archive time is in the name (`stem~YYYYMMDD-HHMMSS`),
+                        // so this works the same on every file system.
+                        let stamp = name
+                            .rsplit_once('~')
+                            .map(|(_, rest)| rest.get(..15).unwrap_or(rest).to_owned())
+                            .unwrap_or_default();
+                        files.push((stamp, e.metadata.len, rel));
+                    }
+                    FileKind::Symlink => {}
+                }
+            }
+        }
+        let cutoff = format_utc_compact(mtime_ns(
+            self.clock
+                .now()
+                .checked_sub(max_age)
+                .unwrap_or(SystemTime::UNIX_EPOCH),
+        ));
+        files.sort();
+        let mut total: u64 = files.iter().map(|f| f.1).sum();
+        let mut removed = 0;
+        for (stamp, size, rel) in files {
+            if stamp.as_str() >= cutoff.as_str() && total <= max_bytes {
+                break;
+            }
+            match self.fs.remove_file(&rel_to_path(&self.root, &rel)) {
+                Ok(()) => {
+                    total -= size;
+                    removed += 1;
+                }
+                Err(e) if not_found(&e) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(removed)
     }
 
     // ----- planning -----
@@ -237,6 +406,13 @@ impl Folder {
             .into_iter()
             .map(|(_, r)| r)
             .collect();
+        let is_dir = local
+            .iter()
+            .chain(&remotes)
+            .any(|r| r.kind == EntryKind::Dir);
+        if self.ignore.is_ignored(path, is_dir) {
+            return Ok(None);
+        }
         Ok(plan_path(local.as_ref(), &remotes))
     }
 
@@ -303,6 +479,10 @@ impl Folder {
                     if entry.as_ref().map(|e| &e.record) != Some(loser) {
                         return Ok(Outcome::LocalChanged);
                     }
+                }
+                let creating = !record.deleted && entry.as_ref().is_none_or(|e| e.record.deleted);
+                if creating && let Some(why) = self.name_problem(&path)? {
+                    return Ok(Outcome::Blocked(why));
                 }
                 if record.deleted {
                     self.apply_delete(record, entry.as_ref())?
@@ -633,22 +813,22 @@ impl Folder {
         if let Some(o) = self.ensure_parents(rel)? {
             return Ok(o);
         }
-        if let Some(m) = self.disk(rel)? {
-            if m.kind == FileKind::Dir {
-                // A directory is being replaced by a file. Its contents are
-                // deleted by their own (later-ordered) actions; once it is
-                // empty it can go.
-                if !entry.is_some_and(|e| e.record.is_live_dir()) {
-                    return Ok(Outcome::LocalChanged);
-                }
-                if !self.fs.read_dir(&self.abs(rel))?.is_empty() {
-                    return Ok(Outcome::Blocked(format!("{rel} is a non-empty directory")));
-                }
-                self.fs.remove_dir(&self.abs(rel))?;
-                // Nothing of the directory is left to protect; the record
-                // below replaces its entry.
-                return self.apply_file(record, None, false, source, stats);
+        if let Some(m) = self.disk(rel)?
+            && m.kind == FileKind::Dir
+        {
+            // A directory is being replaced by a file. Its contents are
+            // deleted by their own (later-ordered) actions; once it is
+            // empty it can go.
+            if !entry.is_some_and(|e| e.record.is_live_dir()) {
+                return Ok(Outcome::LocalChanged);
             }
+            if !self.fs.read_dir(&self.abs(rel))?.is_empty() {
+                return Ok(Outcome::Blocked(format!("{rel} is a non-empty directory")));
+            }
+            self.fs.remove_dir(&self.abs(rel))?;
+            // Nothing of the directory is left to protect; the record
+            // below replaces its entry.
+            return self.apply_file(record, None, false, source, stats);
         }
 
         // 1. Assemble into a temp file next to the target, verifying chunks.
@@ -816,7 +996,58 @@ impl Folder {
 
 #[cfg(test)]
 mod tests {
+    use bsync_fs::StdFs;
+
     use super::*;
+
+    struct FixedClock(SystemTime);
+
+    impl Clock for FixedClock {
+        fn now(&self) -> SystemTime {
+            self.0
+        }
+    }
+
+    #[test]
+    fn versions_cleanup_by_age_then_size() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let v = root.join(".bsync/versions/sub");
+        std::fs::create_dir_all(&v).unwrap();
+        // 2024-01-01 .. 2024-01-04, 100 bytes each.
+        for (day, name) in [
+            (1, "a~20240101-120000.txt"),
+            (2, "b~20240102-120000"),
+            (3, "sub-c~20240103-120000.md"),
+            (4, "d~20240104-120000.txt"),
+        ] {
+            let dir = if day == 3 {
+                v.clone()
+            } else {
+                root.join(".bsync/versions")
+            };
+            std::fs::write(dir.join(name.trim_start_matches("sub-")), vec![0u8; 100]).unwrap();
+        }
+        // "Now" is 2024-01-05 12:00 UTC.
+        let now = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_704_456_000);
+        let f = Folder::new(
+            Arc::new(StdFs),
+            Arc::new(FixedClock(now)),
+            root.to_path_buf(),
+            DeviceId::from_bytes([1; 32]),
+            ChunkParams::DEFAULT,
+            Index::open_in_memory().unwrap(),
+        );
+        let day = std::time::Duration::from_secs(86_400);
+        // Older than 3.5 days: only a (Jan 1).
+        assert_eq!(f.clean_versions(day * 7 / 2, u64::MAX).unwrap(), 1);
+        assert!(!root.join(".bsync/versions/a~20240101-120000.txt").exists());
+        // Size cap of 200 bytes: the oldest remaining (b) goes.
+        assert_eq!(f.clean_versions(day * 30, 200).unwrap(), 1);
+        assert!(!root.join(".bsync/versions/b~20240102-120000").exists());
+        assert!(v.join("c~20240103-120000.md").exists());
+        assert!(root.join(".bsync/versions/d~20240104-120000.txt").exists());
+    }
 
     #[test]
     fn split_helpers() {
