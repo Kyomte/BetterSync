@@ -310,7 +310,9 @@ impl Daemon {
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
-        self.net.close();
+        if let Some(rt) = self.runtime.as_ref() {
+            rt.block_on(self.net.shutdown());
+        }
         if let Some(rt) = self.runtime.take() {
             rt.shutdown_timeout(Duration::from_secs(2));
         }

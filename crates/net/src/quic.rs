@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bsync_core::{DeviceId, FolderId};
 use bsync_proto::{Message, PROTOCOL_VERSION, frame_len};
@@ -44,7 +44,13 @@ pub type FoldersFor = Arc<dyn Fn(DeviceId) -> Vec<FolderId> + Send + Sync>;
 struct Conn {
     conn: quinn::Connection,
     tx: mpsc::UnboundedSender<Vec<u8>>,
+    since: Instant,
 }
+
+/// Two connections to the same peer within this window are a simultaneous
+/// dial; outside it, the newer one means the peer reconnected (e.g. after a
+/// restart whose close never reached us).
+const DIAL_RACE_WINDOW: Duration = Duration::from_secs(5);
 
 struct Inner {
     identity: Identity,
@@ -154,8 +160,10 @@ impl QuicNet {
         Arc::new(QuicTransport { net: self.clone() })
     }
 
-    pub fn close(&self) {
+    /// Close every connection and wait (briefly) until peers were told.
+    pub async fn shutdown(&self) {
         self.inner.endpoint.close(0u32.into(), b"shutdown");
+        let _ = tokio::time::timeout(Duration::from_secs(1), self.inner.endpoint.wait_idle()).await;
     }
 
     async fn accept_loop(self) {
@@ -233,8 +241,9 @@ impl QuicNet {
         {
             let mut conns = self.conns();
             if let Some(existing) = conns.get(&peer) {
-                let existing_alive = existing.conn.close_reason().is_none();
-                if existing_alive && !self.preferred(peer, initiated_by_me) {
+                let racing = existing.conn.close_reason().is_none()
+                    && existing.since.elapsed() < DIAL_RACE_WINDOW;
+                if racing && !self.preferred(peer, initiated_by_me) {
                     conn.close(0u32.into(), b"duplicate");
                     return;
                 }
@@ -248,6 +257,7 @@ impl QuicNet {
                 Conn {
                     conn: conn.clone(),
                     tx: tx.clone(),
+                    since: Instant::now(),
                 },
             );
         }

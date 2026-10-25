@@ -19,11 +19,15 @@ struct Peer {
 
 impl Peer {
     fn new(name: &str) -> Self {
+        Self::with_identity(name, Identity::generate().unwrap())
+    }
+
+    fn with_identity(name: &str, identity: Identity) -> Self {
         let paired: PairedSet = Arc::new(RwLock::new(BTreeSet::new()));
         let (tx, events) = mpsc::unbounded_channel();
         let net = QuicNet::bind(
             "127.0.0.1:0".parse().unwrap(),
-            Identity::generate().unwrap(),
+            identity,
             paired.clone(),
             name.into(),
             Arc::new(|_| vec![FolderId("f".into())]),
@@ -166,4 +170,58 @@ async fn impostor_at_expected_address_is_rejected() {
             .is_err()
     );
     b.expect_nothing().await;
+}
+
+/// Regression: a peer that disappeared without closing its connection (crash,
+/// killed process) and came back was refused as a "duplicate" until the old
+/// connection timed out.
+#[test]
+fn restarted_peer_is_accepted_while_old_connection_lingers() {
+    let main = tokio::runtime::Runtime::new().unwrap();
+    let a_identity = Identity::generate().unwrap();
+    // The bug only showed when the restarted peer, as the dialer, was not
+    // the "preferred" side of the duplicate rule: a < b.
+    let key = loop {
+        let k = Identity::generate().unwrap();
+        if a_identity.device_id() < k.device_id() {
+            break k.pkcs8().to_vec();
+        }
+    };
+    let mut a = main.block_on(async { Peer::with_identity("a", a_identity) });
+    let a_addr = a.net.local_addr().unwrap();
+
+    // b runs on its own runtime, which we kill without any shutdown.
+    let crashed = tokio::runtime::Runtime::new().unwrap();
+    let b = crashed.block_on(async {
+        let b = Peer::with_identity("b", Identity::from_pkcs8(&key).unwrap());
+        b.pair(&a);
+        b
+    });
+    a.pair(&b);
+    let b_id = b.id();
+    crashed.block_on(b.net.connect(a.id(), a_addr)).unwrap();
+    main.block_on(async {
+        assert!(matches!(a.next().await, Some(NetEvent::Connected { .. })));
+    });
+    drop(b);
+    crashed.shutdown_background();
+
+    // b comes back with the same identity and dials again.
+    main.block_on(async {
+        let b2 = Peer::with_identity("b", Identity::from_pkcs8(&key).unwrap());
+        b2.pair(&a);
+        assert_eq!(b2.id(), b_id);
+        // Let the dial-race window pass, as a real restart would.
+        tokio::time::sleep(Duration::from_millis(5100)).await;
+        b2.net.connect(a.id(), a_addr).await.unwrap();
+        let mut connected = false;
+        while let Some(e) = a.next().await {
+            if matches!(e, NetEvent::Connected { peer, .. } if peer == b_id) {
+                connected = true;
+                break;
+            }
+        }
+        assert!(connected, "a refused the restarted peer");
+        assert!(a.net.is_connected(&b_id));
+    });
 }

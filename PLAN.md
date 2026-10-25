@@ -153,7 +153,7 @@ Legend: 🐧 = fully verifiable on Linux / in a cloud session. 💻 = needs a ma
 
 **Done when:** two daemons on localhost (different ports + config dirs) pair, exchange indexes, and one-way sync works over the network. Unpaired peer is rejected (test).
 
-### M5 — Two-way sync, version vectors, conflicts 🐧
+### M5 — Two-way sync, version vectors, conflicts 🐧 ✅
 - Version vectors on every record; planner handles newer/older/concurrent.
 - Conflict copies named `name.sync-conflict-YYYYMMDD-HHMMSS-<shortdevice>.ext`.
 - Delete-vs-edit, directory-delete-vs-add, rename detection by chunk match.

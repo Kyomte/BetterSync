@@ -71,6 +71,11 @@ impl Identity {
         }
     }
 
+    /// The private key as PKCS#8 DER (what [`Identity::load_or_create`] stores).
+    pub fn pkcs8(&self) -> &[u8] {
+        &self.key_pkcs8
+    }
+
     pub fn device_id(&self) -> DeviceId {
         self.device_id
     }
