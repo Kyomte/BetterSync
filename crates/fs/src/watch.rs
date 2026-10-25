@@ -8,7 +8,8 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use notify::RecursiveMode;
+use notify::event::ModifyKind;
+use notify::{EventKind, RecursiveMode};
 use notify_debouncer_full::{DebounceEventResult, new_debouncer};
 
 use crate::is_internal;
@@ -107,7 +108,15 @@ impl FolderWatcher {
             let on_event = on_event.clone();
             move |result: DebounceEventResult| match result {
                 Ok(events) => {
-                    if events.iter().any(|e| e.need_rescan()) {
+                    // A rename reported with only one of its two paths
+                    // (FSEvents does this) hides where the file went or came
+                    // from; only a full rescan finds the other side. Rescans
+                    // only re-hash changed files, so this is cheap.
+                    let half_rename = |e: &notify_debouncer_full::DebouncedEvent| {
+                        matches!(e.kind, EventKind::Modify(ModifyKind::Name(_)))
+                            && e.paths.len() < 2
+                    };
+                    if events.iter().any(|e| e.need_rescan() || half_rename(e)) {
                         on_event(WatchEvent::FullRescan);
                         return;
                     }
