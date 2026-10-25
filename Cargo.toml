@@ -1,0 +1,37 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "bins/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+repository = "https://github.com/Kyomte/BetterSync"
+publish = false
+
+[workspace.dependencies]
+bsync-core = { path = "crates/core" }
+bsync-index = { path = "crates/index" }
+bsync-fs = { path = "crates/fs" }
+bsync-proto = { path = "crates/proto" }
+bsync-net = { path = "crates/net" }
+bsync-engine = { path = "crates/engine" }
+bsync-sim = { path = "crates/sim" }
+
+thiserror = "2"
+anyhow = "1"
+tempfile = "3"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+unwrap_used = "warn"
+
+[profile.release]
+lto = "thin"

@@ -1,0 +1,18 @@
+[package]
+name = "bsync-engine"
+description = "Per-folder sync engine gluing index, fs, proto and net."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+bsync-core.workspace = true
+bsync-index.workspace = true
+bsync-fs.workspace = true
+bsync-proto.workspace = true
+bsync-net.workspace = true
+
+[lints]
+workspace = true

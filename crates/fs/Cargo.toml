@@ -1,0 +1,17 @@
+[package]
+name = "bsync-fs"
+description = "File-system layer: FileSystem trait, scanning, watching, atomic writes."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+bsync-core.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

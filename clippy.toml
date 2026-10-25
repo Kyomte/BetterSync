@@ -1,0 +1,3 @@
+# Data-safety code should not panic on `unwrap`; tests may.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
