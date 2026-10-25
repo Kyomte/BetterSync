@@ -168,7 +168,7 @@ Legend: 🐧 = fully verifiable on Linux / in a cloud session. 💻 = needs a ma
 
 **Done when:** 10,000 random runs pass in CI's nightly job (a smaller count runs on every PR).
 
-### M7 — Discovery 🐧/💻
+### M7 — Discovery 🐧/💻 ✅
 - mDNS announce/browse; static address list per device; connection manager with backoff, multiple addresses, prefer lowest RTT.
 
 **Done when:** two daemons on the same machine find each other via mDNS (🐧 where multicast works). 💻 PC ↔ Mac on Wi-Fi, then over Tailscale with one device on phone hotspot.

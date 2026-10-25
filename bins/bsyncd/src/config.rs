@@ -64,6 +64,13 @@ pub struct Config {
     pub devices: Vec<DeviceConfig>,
     #[serde(default)]
     pub folders: Vec<FolderConfig>,
+    /// Announce and find devices on the local network via mDNS.
+    #[serde(default = "yes")]
+    pub local_discovery: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -73,6 +80,7 @@ impl Default for Config {
             listen: format!("0.0.0.0:{DEFAULT_PORT}"),
             devices: Vec::new(),
             folders: Vec::new(),
+            local_discovery: true,
         }
     }
 }
@@ -147,6 +155,14 @@ impl Config {
         self.devices
             .iter()
             .filter_map(|d| d.device_id().ok())
+            .collect()
+    }
+
+    /// Paired devices and their static addresses, for the dialer.
+    pub fn dial_targets(&self) -> std::collections::BTreeMap<DeviceId, Vec<String>> {
+        self.devices
+            .iter()
+            .filter_map(|d| Some((d.device_id().ok()?, d.addresses.clone())))
             .collect()
     }
 

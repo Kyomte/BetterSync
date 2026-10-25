@@ -60,6 +60,8 @@ struct Inner {
     events: EventSink,
     name: String,
     folders_for: FoldersFor,
+    /// Signalled whenever a connection is added or removed.
+    changed: Arc<tokio::sync::Notify>,
 }
 
 /// A QUIC endpoint that both accepts and makes connections.
@@ -110,6 +112,7 @@ impl QuicNet {
                 events,
                 name,
                 folders_for,
+                changed: Arc::new(tokio::sync::Notify::new()),
             }),
         };
         let acceptor = net.clone();
@@ -141,6 +144,16 @@ impl QuicNet {
         self.conns().keys().copied().collect()
     }
 
+    /// Signalled whenever a connection is added or removed.
+    pub fn changed(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.inner.changed)
+    }
+
+    /// The address a connected peer is reached at.
+    pub fn remote_address(&self, peer: &DeviceId) -> Option<SocketAddr> {
+        self.conns().get(peer).map(|c| c.conn.remote_address())
+    }
+
     /// Round-trip time to a connected peer.
     pub fn rtt(&self, peer: &DeviceId) -> Option<Duration> {
         self.conns().get(peer).map(|c| c.conn.rtt())
@@ -150,6 +163,7 @@ impl QuicNet {
     pub fn disconnect(&self, peer: &DeviceId) {
         let removed = self.conns().remove(peer);
         if let Some(c) = removed {
+            self.inner.changed.notify_waiters();
             c.conn.close(0u32.into(), b"bye");
             (self.inner.events)(NetEvent::Disconnected { peer: *peer });
         }
@@ -252,6 +266,7 @@ impl QuicNet {
                     (self.inner.events)(NetEvent::Disconnected { peer });
                 }
             }
+            self.inner.changed.notify_waiters();
             conns.insert(
                 peer,
                 Conn {
@@ -287,6 +302,7 @@ impl QuicNet {
             current
         };
         if was_current {
+            self.inner.changed.notify_waiters();
             (self.inner.events)(NetEvent::Disconnected { peer });
         }
     }

@@ -225,3 +225,43 @@ fn restarted_peer_is_accepted_while_old_connection_lingers() {
         assert!(a.net.is_connected(&b_id));
     });
 }
+
+#[tokio::test]
+async fn dialer_tries_addresses_until_one_works() {
+    let mut a = Peer::new("a");
+    let mut b = Peer::new("b");
+    a.pair(&b);
+    b.pair(&a);
+    let dialer = bsync_net::Dialer::start(a.net.clone());
+    // A dead address first (nothing listens there), then the real one.
+    let dead = std::net::UdpSocket::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    dialer.set_devices(
+        [(
+            b.id(),
+            vec![dead.to_string(), b.net.local_addr().unwrap().to_string()],
+        )]
+        .into(),
+    );
+    // The dead address costs one dial timeout (5 s) before the real one.
+    let first = tokio::time::timeout(Duration::from_secs(15), b.events.recv()).await;
+    assert!(
+        matches!(first, Ok(Some(NetEvent::Connected { .. }))),
+        "{first:?}"
+    );
+    assert!(matches!(a.next().await, Some(NetEvent::Connected { .. })));
+
+    // When the connection drops, the dialer reconnects.
+    b.net.disconnect(&a.id());
+    let mut reconnected = false;
+    for _ in 0..6 {
+        let e = tokio::time::timeout(Duration::from_secs(15), a.events.recv()).await;
+        if let Ok(Some(NetEvent::Connected { .. })) = e {
+            reconnected = true;
+            break;
+        }
+    }
+    assert!(reconnected);
+}

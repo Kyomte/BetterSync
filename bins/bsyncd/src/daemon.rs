@@ -17,7 +17,7 @@ use bsync_core::{ChunkParams, DeviceId};
 use bsync_engine::{EngineConfig, EngineStatus, Folder, SyncEngine, SystemClock};
 use bsync_fs::{FolderWatcher, StdFs, WatchConfig, WatchEvent};
 use bsync_index::Index;
-use bsync_net::{Identity, NetEvent, PairedSet, QuicNet};
+use bsync_net::{Dialer, Discovery, Identity, NetEvent, PairedSet, QuicNet};
 
 use crate::config::{Config, FolderConfig};
 
@@ -109,6 +109,7 @@ struct EngineThread {
     folders: Vec<FolderRuntime>,
     events_tx: mpsc::Sender<Event>,
     peers_seen: std::collections::BTreeMap<DeviceId, (String, SocketAddr)>,
+    dialer: Arc<Dialer>,
 }
 
 /// A running daemon.
@@ -120,6 +121,7 @@ pub struct Daemon {
     device_id: DeviceId,
     local_addr: SocketAddr,
     config_dir: PathBuf,
+    _discovery: Option<Discovery>,
 }
 
 impl std::fmt::Debug for Daemon {
@@ -133,9 +135,6 @@ impl std::fmt::Debug for Daemon {
 
 /// What the folder's chunking uses (fixed for now).
 const CHUNKS: ChunkParams = ChunkParams::DEFAULT;
-
-/// How often to retry connecting to devices that are not connected.
-const RECONNECT_EVERY: Duration = Duration::from_secs(5);
 
 impl Daemon {
     pub fn start(config_dir: &Path) -> Result<Self> {
@@ -196,33 +195,22 @@ impl Daemon {
         let local_addr = net.local_addr()?;
         tracing::info!(device = %me, %local_addr, "daemon started");
 
-        // Dial paired devices that are not connected.
-        {
-            let net = net.clone();
-            let dir = config_dir.to_path_buf();
-            runtime.spawn(async move {
-                loop {
-                    if let Ok(cfg) = Config::load(&dir) {
-                        for d in &cfg.devices {
-                            let Ok(id) = d.device_id() else { continue };
-                            if net.is_connected(&id) {
-                                continue;
-                            }
-                            for addr in &d.addresses {
-                                let Some(sock) = resolve(addr).await else {
-                                    continue;
-                                };
-                                match net.connect(id, sock).await {
-                                    Ok(()) => break,
-                                    Err(e) => tracing::debug!("connect {addr}: {e}"),
-                                }
-                            }
-                        }
-                    }
-                    tokio::time::sleep(RECONNECT_EVERY).await;
-                }
-            });
-        }
+        // Keep paired devices connected, using static and mDNS addresses.
+        let dialer = {
+            let _guard = runtime.enter();
+            Dialer::start(net.clone())
+        };
+        dialer.set_devices(config.dial_targets());
+        let discovery = if config.local_discovery {
+            let d = Arc::clone(&dialer);
+            Discovery::start(me, local_addr.port(), move |peer, addrs| {
+                d.discovered(peer, addrs)
+            })
+            .map_err(|e| tracing::warn!("LAN discovery unavailable: {e}"))
+            .ok()
+        } else {
+            None
+        };
 
         let mut thread_state = EngineThread {
             config_dir: config_dir.to_path_buf(),
@@ -232,6 +220,7 @@ impl Daemon {
             folders: Vec::new(),
             events_tx: events_tx.clone(),
             peers_seen: Default::default(),
+            dialer: Arc::clone(&dialer),
         };
         thread_state.open_folders(watch);
         let thread = std::thread::Builder::new()
@@ -246,6 +235,7 @@ impl Daemon {
             device_id: me,
             local_addr,
             config_dir: config_dir.to_path_buf(),
+            _discovery: discovery,
         })
     }
 
@@ -323,13 +313,6 @@ impl Drop for Daemon {
     fn drop(&mut self) {
         self.stop();
     }
-}
-
-async fn resolve(addr: &str) -> Option<SocketAddr> {
-    if let Ok(a) = addr.parse() {
-        return Some(a);
-    }
-    tokio::net::lookup_host(addr).await.ok()?.next()
 }
 
 impl EngineThread {
@@ -657,6 +640,7 @@ impl EngineThread {
         for d in removed {
             self.net.disconnect(&d);
         }
+        self.dialer.set_devices(config.dial_targets());
         if let Ok(mut f) = folders_cfg.write() {
             *f = config.folders.clone();
         }

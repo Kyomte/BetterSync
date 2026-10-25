@@ -16,6 +16,7 @@ quinn.workspace = true
 rustls.workspace = true
 rcgen.workspace = true
 x509-parser.workspace = true
+mdns-sd.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
