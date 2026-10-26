@@ -74,6 +74,17 @@ pub struct Config {
     pub api_listen: String,
     #[serde(default)]
     pub bandwidth: Bandwidth,
+    /// Try the machines in `tailscale status` for paired devices that have
+    /// no working address.
+    #[serde(default = "yes")]
+    pub tailscale_discovery: bool,
+    /// The port other devices listen on over Tailscale.
+    #[serde(default = "default_port")]
+    pub tailscale_port: u16,
+}
+
+fn default_port() -> u16 {
+    DEFAULT_PORT
 }
 
 /// Whether to treat the network as metered.
@@ -145,6 +156,8 @@ impl Default for Config {
             local_discovery: true,
             api_listen: default_api(),
             bandwidth: Bandwidth::default(),
+            tailscale_discovery: true,
+            tailscale_port: DEFAULT_PORT,
         }
     }
 }

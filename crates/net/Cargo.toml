@@ -17,6 +17,8 @@ rustls.workspace = true
 rcgen.workspace = true
 x509-parser.workspace = true
 mdns-sd.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]

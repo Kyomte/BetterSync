@@ -28,8 +28,9 @@ On mobile data (Windows metered connections, macOS hotspots or Low Data
 Mode) files over 50 MB wait for an unmetered network; see
 `bsync bandwidth --help` for that threshold and upload/download limits.
 
-Devices on the same network also find each other via mDNS, so `--addr` is
-only needed for Tailscale or other routed networks. Put gitignore-style
+Devices on the same network find each other via mDNS, and devices on your
+tailnet are found through `tailscale status` (when Tailscale is installed),
+so `--addr` is only needed for other routed networks or non-default ports. Put gitignore-style
 patterns in `.bsyncignore` at the folder root to keep files local.
 
 ## Resource use when idle

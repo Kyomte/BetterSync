@@ -31,12 +31,17 @@ pub enum Source {
     Lan,
     /// Configured by the user (e.g. a Tailscale address).
     Static,
+    /// A machine on the tailnet that may or may not run a paired device;
+    /// tried last, the TLS handshake tells.
+    Tailnet,
 }
 
 #[derive(Debug, Default)]
 struct DeviceState {
     static_addrs: Vec<String>,
     discovered: Vec<SocketAddr>,
+    /// Tailnet addresses this device was reached at.
+    learned: Vec<SocketAddr>,
     failures: u32,
     next_attempt: Option<Instant>,
     next_upgrade: Option<Instant>,
@@ -47,6 +52,8 @@ struct Inner {
     devices: BTreeMap<DeviceId, DeviceState>,
     /// Last measured round-trip time per address.
     rtt: BTreeMap<SocketAddr, Duration>,
+    /// Addresses of other machines on the tailnet (from `tailscale status`).
+    tailnet: Vec<SocketAddr>,
 }
 
 /// Is `ip` on a local network (private, link-local or loopback)? Tailscale's
@@ -156,20 +163,53 @@ impl Dialer {
         self.wake.notify_one();
     }
 
+    /// Machines on the tailnet (from `tailscale status`), tried for paired
+    /// devices that are not reachable otherwise.
+    pub fn set_tailnet(&self, addrs: Vec<SocketAddr>) {
+        {
+            let mut inner = self.lock();
+            if inner.tailnet == addrs {
+                return;
+            }
+            inner.tailnet = addrs;
+            for st in inner.devices.values_mut() {
+                st.failures = 0;
+                st.next_attempt = None;
+            }
+        }
+        self.wake.notify_one();
+    }
+
     /// A connection dropped (or anything else that warrants a look).
     pub fn poke(&self) {
         self.wake.notify_one();
     }
 
     async fn candidates(&self, device: DeviceId) -> Vec<SocketAddr> {
-        let (statics, discovered, rtt) = {
+        let (statics, discovered, learned, tailnet, rtt) = {
             let inner = self.lock();
             let Some(st) = inner.devices.get(&device) else {
                 return Vec::new();
             };
+            // Tailnet machines already known to be some other device are
+            // not worth a try.
+            let others: Vec<SocketAddr> = inner
+                .devices
+                .iter()
+                .filter(|(id, _)| **id != device)
+                .flat_map(|(_, d)| d.learned.iter().copied())
+                .collect();
+            let tailnet: Vec<SocketAddr> = inner
+                .tailnet
+                .iter()
+                .filter(|a| !others.contains(a))
+                .copied()
+                .collect();
             (
                 st.static_addrs.clone(),
                 st.discovered.clone(),
+                st.learned.clone(),
+                tailnet,
                 inner.rtt.clone(),
             )
         };
@@ -182,6 +222,8 @@ impl Dialer {
                 cands.extend(found.map(|a| (a, Source::Static)));
             }
         }
+        cands.extend(learned.into_iter().map(|a| (a, Source::Static)));
+        cands.extend(tailnet.into_iter().map(|a| (a, Source::Tailnet)));
         order_candidates(&cands, &rtt)
     }
 
@@ -192,8 +234,15 @@ impl Dialer {
                 Ok(Ok(())) => {
                     // Give the handshake a moment to register, then record RTT.
                     tokio::time::sleep(Duration::from_millis(50)).await;
+                    let mut inner = self.lock();
                     if let Some(rtt) = self.net.rtt(&device) {
-                        self.lock().rtt.insert(*addr, rtt);
+                        inner.rtt.insert(*addr, rtt);
+                    }
+                    if inner.tailnet.contains(addr)
+                        && let Some(st) = inner.devices.get_mut(&device)
+                        && !st.learned.contains(addr)
+                    {
+                        st.learned.push(*addr);
                     }
                     return true;
                 }

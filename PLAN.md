@@ -201,7 +201,7 @@ Legend: 🐧 = fully verifiable on Linux / in a cloud session. 💻 = needs a ma
 - **S2 — CRDT merge for text files** (e.g. `automerge` / `yrs`) instead of conflict copies.
 - **S3 — Mobile client** (Android first; iOS background limits are severe).
 - **S4 — Always-on peer mode** for a home server / Raspberry Pi (headless daemon only).
-- **S5 — Tailscale auto-discovery** via `tailscale status --json`.
+- **S5 — Tailscale auto-discovery** via `tailscale status --json`. ✅ The daemon reads the online tailnet machines every 5 min and the dialer tries them (last) for paired devices it cannot otherwise reach; the pinned TLS handshake tells which machine is which device, and the match is remembered.
 
 ---
 

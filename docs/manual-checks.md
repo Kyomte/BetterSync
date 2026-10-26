@@ -20,3 +20,4 @@ with date, OS version and result. CI only covers compile + automated tests.
 | M10 | Idle CPU ≈ 0 and memory of `bsyncd` + `bsync-tray` (record below) | not yet run | not yet run |
 | M11 | On a phone hotspot (Windows: metered connection; macOS: iPhone hotspot or Low Data Mode) `bsync status` shows "Network: metered" and a >50 MB file waits; back on Wi-Fi it syncs | not yet run | not yet run |
 | M11 | `bsync bandwidth --up 500` limits upload to ~500 kB/s (watch Task Manager / Activity Monitor) | not yet run | not yet run |
+| S5 | With Tailscale running on both and no `--addr` configured, PC ↔ Mac connect over the tailnet from different networks | not yet run | not yet run |

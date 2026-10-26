@@ -141,6 +141,9 @@ impl std::fmt::Debug for Daemon {
     }
 }
 
+/// How often the tailnet's machine list is re-read.
+const TAILNET_REFRESH: Duration = Duration::from_secs(300);
+
 /// What the folder's chunking uses (fixed for now).
 const CHUNKS: ChunkParams = ChunkParams::DEFAULT;
 
@@ -219,6 +222,27 @@ impl Daemon {
         } else {
             None
         };
+
+        // Machines on the tailnet, refreshed every few minutes.
+        if config.tailscale_discovery {
+            let dialer = Arc::clone(&dialer);
+            let port = config.tailscale_port;
+            runtime.spawn(async move {
+                loop {
+                    match tokio::task::spawn_blocking(move || bsync_net::tailscale::query(port))
+                        .await
+                    {
+                        Ok(Some(addrs)) => dialer.set_tailnet(addrs),
+                        Ok(None) => {
+                            tracing::debug!("tailscale not available; tailnet discovery idle");
+                            return;
+                        }
+                        Err(_) => return,
+                    }
+                    tokio::time::sleep(TAILNET_REFRESH).await;
+                }
+            });
+        }
 
         // Follow the OS's metered-network state (Windows, macOS).
         let metered_watcher = {
