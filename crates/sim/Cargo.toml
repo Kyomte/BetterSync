@@ -1,0 +1,23 @@
+[package]
+name = "bsync-sim"
+description = "Deterministic multi-peer simulator: in-memory FS and network, seeded RNG."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+bsync-core.workspace = true
+bsync-fs.workspace = true
+bsync-net.workspace = true
+bsync-index.workspace = true
+bsync-proto.workspace = true
+bsync-engine.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

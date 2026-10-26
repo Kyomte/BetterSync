@@ -118,7 +118,7 @@ Each milestone should fit in **one session** and end with green tests. Do them i
 
 Legend: 🐧 = fully verifiable on Linux / in a cloud session. 💻 = needs a manual check on the user's Windows/Mac machines (CI covers compile + unit tests only).
 
-### M0 — Workspace, CI, simulator skeleton 🐧
+### M0 — Workspace, CI, simulator skeleton 🐧 ✅
 - Cargo workspace with the crate layout above (empty crates compile).
 - `rust-toolchain.toml` (stable), `rustfmt.toml`, clippy config.
 - GitHub Actions matrix: `ubuntu-latest`, `windows-latest`, `macos-latest` running `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --workspace`.
@@ -126,7 +126,7 @@ Legend: 🐧 = fully verifiable on Linux / in a cloud session. 💻 = needs a ma
 
 **Done when:** CI is green on all three OSes; `cargo test --workspace` passes locally.
 
-### M1 — Scanner, chunker, index 🐧
+### M1 — Scanner, chunker, index 🐧 ✅
 - `fs`: recursive scan producing file records (skip `.bsync/`).
 - `core`: FastCDC chunking (`fastcdc` crate) + BLAKE3 (`blake3` crate).
 - `index`: SQLite schema + migrations; store/update records and chunk lists; local sequence numbers.
@@ -134,26 +134,26 @@ Legend: 🐧 = fully verifiable on Linux / in a cloud session. 💻 = needs a ma
 
 **Done when:** tests cover: scan of a fixture tree; editing the middle of a 10 MB file changes only a few chunks; rescan without changes does no hashing.
 
-### M2 — Watcher + debouncing 🐧/💻
+### M2 — Watcher + debouncing 🐧/💻 ✅
 - `notify` + `notify-debouncer-full`; events trigger targeted rescans of affected paths.
 - Periodic full rescan fallback (default 1 h) for missed events.
 
 **Done when:** integration test: create/modify/rename/delete in a temp dir updates the index within debounce + 500 ms. 💻 check on Windows & macOS that editor "safe saves" (VS Code, Word) are handled.
 
-### M3 — Local one-way sync (in-process) 🐧
+### M3 — Local one-way sync (in-process) 🐧 ✅
 - `core` sync planner: given local index + remote index → list of actions (fetch, delete, mkdir, conflict).
 - `engine`: applies actions with atomic writes + versions folder, fetching chunks through a trait (in-process implementation reads from the source folder).
 
 **Done when:** two temp dirs, A → B, reach byte-identical state across a scripted set of creates/edits/deletes/renames; versions folder holds replaced content.
 
-### M4 — Identity, pairing, transport 🐧
+### M4 — Identity, pairing, transport 🐧 ✅
 - Ed25519 key generation + storage; self-signed cert via `rcgen`; QUIC via `quinn` with custom cert verifier that pins device IDs.
 - `proto`: Hello (protocol version, device ID, folders), IndexUpdate(since_seq), RequestChunk, ChunkData, Ping.
 - Pairing: `bsync pair <device-id>` on both sides (manual mutual add, like Syncthing). No unpaired connections accepted.
 
 **Done when:** two daemons on localhost (different ports + config dirs) pair, exchange indexes, and one-way sync works over the network. Unpaired peer is rejected (test).
 
-### M5 — Two-way sync, version vectors, conflicts 🐧
+### M5 — Two-way sync, version vectors, conflicts 🐧 ✅
 - Version vectors on every record; planner handles newer/older/concurrent.
 - Conflict copies named `name.sync-conflict-YYYYMMDD-HHMMSS-<shortdevice>.ext`.
 - Delete-vs-edit, directory-delete-vs-add, rename detection by chunk match.
@@ -161,38 +161,39 @@ Legend: 🐧 = fully verifiable on Linux / in a cloud session. 💻 = needs a ma
 
 **Done when:** tests for every case in "The nasty cases" that are OS-independent; two daemons converge under concurrent edits.
 
-### M6 — Simulator / fuzzing 🐧
+### M6 — Simulator / fuzzing 🐧 ✅
 - `sim` runs N (3–5) engines on the in-memory FS + network with random operations, random partitions/reconnects, random restarts.
 - After quiescence assert: all folders identical, no lost edits (every edit present as a file or conflict copy), invariants hold.
 - `proptest` or a seeded loop; failing seeds are printed and saved as regression tests.
 
 **Done when:** 10,000 random runs pass in CI's nightly job (a smaller count runs on every PR).
 
-### M7 — Discovery 🐧/💻
+### M7 — Discovery 🐧/💻 ✅
 - mDNS announce/browse; static address list per device; connection manager with backoff, multiple addresses, prefer lowest RTT.
 
 **Done when:** two daemons on the same machine find each other via mDNS (🐧 where multicast works). 💻 PC ↔ Mac on Wi-Fi, then over Tailscale with one device on phone hotspot.
 
-### M8 — Robustness & platform rules 🐧/💻
+### M8 — Robustness & platform rules 🐧/💻 ✅
 - Resumable pulls (persist fetched chunks), ignore file (`.bsyncignore`, gitignore syntax via `ignore` crate), path normalisation + case-collision detection, Windows reserved names, locked-file retry, versions folder cleanup policy.
 
 **Done when:** tests for each rule; 💻 Windows ↔ macOS case/Unicode collision manual check.
 
-### M9 — Daemon, CLI, control API 🐧
+### M9 — Daemon, CLI, control API 🐧 ✅
 - `bsyncd`: runs folders, exposes localhost HTTP JSON API (random token in config dir) — status, folders, peers, conflicts, pause/resume.
 - `bsync` CLI over that API.
 - Structured logging (`tracing`) to a rolling file.
 
 **Done when:** `bsync status` shows folders/peers/progress; e2e test drives two daemons purely through the CLI.
 
-### M10 — Tray / menu-bar app + autostart 💻
+### M10 — Tray / menu-bar app + autostart 💻 ✅ (code done; 💻 checklist pending)
 - `bsync-tray`: icon states (idle, syncing, error, paused), menu: open folder, pause, status window, quit.
 - Autostart: Windows HKCU Run value; macOS LaunchAgent plist. (Windows note: launch via `explorer.exe` when testing from a sandboxed shell, or the Run-key write may be virtualised.)
 - Status window with pairing flow and conflict list (small webview or native — decide in the milestone).
+  - **Decided:** a local web page served by the daemon at its control-API address and opened in the default browser (token in the URL fragment). No webview dependency, same page on every OS, and the API it uses is the one the CLI uses.
 
 **Done when:** 💻 manual checklist passes on both OSes; idle CPU ≈ 0 and memory recorded in README.
 
-### M11 — Bandwidth policies 💻
+### M11 — Bandwidth policies 💻 ✅ (code done; 💻 checks pending)
 - Metered-network detection, big-files-on-Wi-Fi-only, rate limits.
 
 ### Stretch

@@ -1,0 +1,22 @@
+# Manual checks (💻)
+
+Items from `PLAN.md` that need a real Windows or macOS machine. Record each run
+with date, OS version and result. CI only covers compile + automated tests.
+
+| Milestone | Check | Windows | macOS |
+|---|---|---|---|
+| M2 | Editor "safe saves" (VS Code, Word) end up as a single edit in the index (`bsync status` shows no stray temp files; history continues) | not yet run | not yet run |
+| M7 | PC ↔ Mac on the same Wi-Fi find each other via mDNS (no addresses configured) and sync | not yet run | not yet run |
+| M7 | PC ↔ Mac over Tailscale with one device on a phone hotspot (static `100.x.y.z:22027` address) | not yet run | not yet run |
+| M7 | Back on the same Wi-Fi, the connection moves to the LAN address within ~1 min | not yet run | not yet run |
+| M8 | Windows ↔ macOS: `Readme.md` vs `README.md` created on each side is refused and shown as blocked on both | not yet run | not yet run |
+| M8 | Windows ↔ macOS: a file named `café.txt` created on macOS (NFD) syncs as one file and edits flow both ways | not yet run | not yet run |
+| M8 | Windows: a file open in Word is retried after closing it (shown as blocked meanwhile) | not yet run | n/a |
+| M10 | Tray icon appears; colour follows state (green idle, blue syncing, grey paused, red needs attention, dark grey daemon not running) | not yet run | not yet run |
+| M10 | Menu: summary line, Open folder ▸ each folder, Pause/Resume syncing, Status and devices… opens the status page, Quit | not yet run | not yet run |
+| M10 | Tray starts `bsyncd` if it is not running | not yet run | not yet run |
+| M10 | "Start at login" toggles the HKCU Run value / LaunchAgent plist and survives a log-out/in (Windows: launch the tray via `explorer.exe` when testing from a sandboxed shell) | not yet run | not yet run |
+| M10 | Status page: pair a device, add a folder, pause/resume, conflict list | not yet run | not yet run |
+| M10 | Idle CPU ≈ 0 and memory of `bsyncd` + `bsync-tray` (record below) | not yet run | not yet run |
+| M11 | On a phone hotspot (Windows: metered connection; macOS: iPhone hotspot or Low Data Mode) `bsync status` shows "Network: metered" and a >50 MB file waits; back on Wi-Fi it syncs | not yet run | not yet run |
+| M11 | `bsync bandwidth --up 500` limits upload to ~500 kB/s (watch Task Manager / Activity Monitor) | not yet run | not yet run |

@@ -1,0 +1,29 @@
+name: Nightly simulator
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: Number of random seeds
+        default: "10000"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain (from rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Random simulator runs
+        env:
+          BSYNC_FUZZ_RUNS: ${{ github.event.inputs.runs || '10000' }}
+          # A different window of seeds every night.
+          BSYNC_FUZZ_SEED: ${{ github.run_number }}000000
+        run: cargo test --release -p bsync-sim --test fuzz -- --nocapture
