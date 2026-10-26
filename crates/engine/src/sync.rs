@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use bsync_core::{DeviceId, FileRecord, FolderId, Hash, is_valid_rel_path};
-use bsync_fs::{BSYNC_DIR, FileSystem, rel_to_path};
+use bsync_fs::{BSYNC_DIR, FileKind, FileSystem, is_internal, rel_to_path};
 use bsync_index::PeerProgress;
 use bsync_net::Transport;
 use bsync_proto::{INDEX_BATCH, Message};
@@ -83,6 +83,45 @@ pub struct EngineStatus {
     pub totals: SyncStats,
 }
 
+/// What a file manager badge shows for a path (stretch goal S1). For a
+/// directory it sums up the index and pending work below it; unscanned
+/// edits inside it only count once the watcher has reported them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathState {
+    /// The index matches the disk and nothing is waiting.
+    Synced,
+    /// A local change not yet scanned, or a remote change not yet applied.
+    Syncing,
+    /// A conflict copy (or, for a directory, one inside it).
+    Conflict,
+    /// Cannot be synced right now, with the reason.
+    Blocked(String),
+    /// Excluded by ignore rules, or BetterSync's own bookkeeping.
+    Ignored,
+    /// Neither on disk nor in the index.
+    Unknown,
+}
+
+impl PathState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Synced => "synced",
+            Self::Syncing => "syncing",
+            Self::Conflict => "conflict",
+            Self::Blocked(_) => "blocked",
+            Self::Ignored => "ignored",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Whether `path` is a conflict copy made by [`bsync_core::plan`].
+pub fn is_conflict_copy(path: &str) -> bool {
+    path.rsplit('/')
+        .next()
+        .is_some_and(|name| name.contains(".sync-conflict-"))
+}
+
 /// Fetched chunks waiting to be assembled, persisted in `.bsync/chunks/`
 /// so an interrupted transfer resumes where it stopped.
 struct ChunkCache {
@@ -143,6 +182,12 @@ pub struct SyncEngine {
     blocked: Vec<(String, String)>,
     totals: SyncStats,
     temp_counter: u64,
+    /// Paths whose [`PathState`] may have changed since the last
+    /// [`SyncEngine::take_touched`], besides index changes; `None` unless
+    /// someone asks.
+    touched: Option<BTreeSet<String>>,
+    /// Index changes up to here were reported by `take_touched`.
+    touched_seq: u64,
 }
 
 impl std::fmt::Debug for SyncEngine {
@@ -188,6 +233,8 @@ impl SyncEngine {
             blocked: Vec::new(),
             totals: SyncStats::default(),
             temp_counter: 0,
+            touched: None,
+            touched_seq: 0,
         })
     }
 
@@ -264,6 +311,75 @@ impl SyncEngine {
             blocked: self.blocked.clone(),
             totals: self.totals.clone(),
         }
+    }
+
+    /// The badge state of record path `rel` (`""` is the folder itself).
+    pub fn path_state(&self, rel: &str) -> Result<PathState> {
+        let rel = bsync_core::names::to_nfc(rel.trim_matches('/'));
+        let below = |p: &str| {
+            rel.is_empty()
+                || p.strip_prefix(rel.as_str())
+                    .is_some_and(|r| r.is_empty() || r.starts_with('/'))
+        };
+        if !rel.is_empty() && is_internal(&rel) {
+            return Ok(PathState::Ignored);
+        }
+        if let Some((_, why)) = self.blocked.iter().find(|(p, _)| below(p)) {
+            return Ok(PathState::Blocked(why.clone()));
+        }
+        let entries = self.folder.index().under(&rel)?;
+        if entries
+            .iter()
+            .any(|e| !e.record.deleted && is_conflict_copy(&e.record.path))
+        {
+            return Ok(PathState::Conflict);
+        }
+        if self.pending.iter().any(|p| below(p)) || self.wanted.iter().any(|(_, p)| below(p)) {
+            return Ok(PathState::Syncing);
+        }
+        let own = entries.iter().find(|e| e.record.path == rel);
+        let meta = match self.folder.fs().metadata(&self.folder.abs(&rel)) {
+            Ok(m) => m,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                // Deleted on disk but not yet scanned?
+                return Ok(match own {
+                    Some(e) if !e.record.deleted => PathState::Syncing,
+                    _ => PathState::Unknown,
+                });
+            }
+            Err(e) => return Err(e.into()),
+        };
+        if !rel.is_empty() && self.folder.is_skipped(&rel, &meta) {
+            return Ok(PathState::Ignored);
+        }
+        if rel.is_empty() {
+            return Ok(PathState::Synced);
+        }
+        Ok(match own {
+            Some(e) if e.record.deleted => PathState::Syncing,
+            Some(e)
+                if meta.kind == FileKind::File && e.stat != Some(crate::scan::stat_of(&meta)) =>
+            {
+                PathState::Syncing
+            }
+            Some(_) => PathState::Synced,
+            // Not scanned yet.
+            None => PathState::Syncing,
+        })
+    }
+
+    /// Record paths whose [`PathState`] may have changed since the last
+    /// call (everything, the first time). Their parent directories may
+    /// have changed too. Tracking starts with the first call.
+    pub fn take_touched(&mut self) -> Result<BTreeSet<String>> {
+        let mut out = self.touched.replace(BTreeSet::new()).unwrap_or_default();
+        loop {
+            let batch = self.folder.index().since(self.touched_seq, INDEX_BATCH)?;
+            let Some(last) = batch.last() else { break };
+            self.touched_seq = last.seq;
+            out.extend(batch.into_iter().map(|e| e.record.path));
+        }
+        Ok(out)
     }
 
     /// No work left that could make progress on its own.
@@ -365,6 +481,7 @@ impl SyncEngine {
         if removed > 0 {
             tracing::info!(folder = %self.config.folder_id, removed, "pruned old versions");
         }
+        self.folder.prune_bases()?;
         Ok(())
     }
 
@@ -688,6 +805,10 @@ impl SyncEngine {
             self.folder.take_ignore_changed();
         }
         let mut wanted: Vec<(Hash, String)> = Vec::new();
+        if let Some(t) = self.touched.as_mut() {
+            t.extend(self.pending.iter().cloned());
+            t.extend(self.blocked.iter().map(|(p, _)| p.clone()));
+        }
         loop {
             let mut actions = Vec::new();
             for path in &self.pending {
@@ -763,6 +884,9 @@ impl SyncEngine {
                 }
             }
             self.pending = still_pending;
+            if let Some(t) = self.touched.as_mut() {
+                t.extend(self.blocked.iter().map(|(p, _)| p.clone()));
+            }
             if !progress {
                 break;
             }

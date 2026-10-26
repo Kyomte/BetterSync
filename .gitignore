@@ -2,3 +2,12 @@
 **/*.rs.bk
 .bsync/
 .DS_Store
+android/.gradle/
+android/build/
+android/app/build/
+android/app/src/main/jniLibs/
+android/local.properties
+/ios/BsyncFFI.xcframework
+/ios/BetterSync.xcodeproj
+/ios/BetterSync/Info.plist
+/ios/build

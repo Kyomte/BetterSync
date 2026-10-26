@@ -7,7 +7,7 @@ use bsync_core::{DeviceId, FileRecord, FolderId, Hash};
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible change to [`Message`].
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Largest frame accepted (a chunk is at most 256 KiB; index batches are
 /// limited by count).
@@ -169,6 +169,7 @@ mod tests {
                     modified_by: dev,
                     hash: Hash::of(b"abc"),
                     chunks: vec![],
+                    ancestors: vec![Hash::of(b"older")],
                 }],
                 last_seq: 42,
             },

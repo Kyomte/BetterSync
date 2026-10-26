@@ -21,6 +21,10 @@ pub struct WatchConfig {
     pub debounce: Duration,
     /// Full rescan interval, in case notifications were missed.
     pub full_rescan: Duration,
+    /// Use the OS's change notifications. Without them only the periodic
+    /// rescans find changes (iOS: its kqueue backend needs a file
+    /// descriptor per watched file, which a big folder would exhaust).
+    pub notifications: bool,
 }
 
 impl Default for WatchConfig {
@@ -28,6 +32,7 @@ impl Default for WatchConfig {
         Self {
             debounce: Duration::from_secs(1),
             full_rescan: Duration::from_secs(60 * 60),
+            notifications: true,
         }
     }
 }
@@ -44,7 +49,7 @@ pub enum WatchEvent {
 
 /// Watches a folder until dropped.
 pub struct FolderWatcher {
-    _debouncer: Box<dyn std::any::Any + Send>,
+    _debouncer: Option<Box<dyn std::any::Any + Send>>,
     stop_timer: mpsc::Sender<()>,
 }
 
@@ -141,14 +146,19 @@ impl FolderWatcher {
         // renames into a bare Create of the new name and drops the old one
         // (seen on macOS CI). Without it renames arrive as Name events,
         // handled above. inotify and Windows report both names anyway.
-        let mut debouncer = new_debouncer_opt::<_, notify::RecommendedWatcher, _>(
-            config.debounce,
-            None,
-            handler,
-            NoCache,
-            notify::Config::default(),
-        )?;
-        debouncer.watch(root, RecursiveMode::Recursive)?;
+        let debouncer: Option<Box<dyn std::any::Any + Send>> = if config.notifications {
+            let mut d = new_debouncer_opt::<_, notify::RecommendedWatcher, _>(
+                config.debounce,
+                None,
+                handler,
+                NoCache,
+                notify::Config::default(),
+            )?;
+            d.watch(root, RecursiveMode::Recursive)?;
+            Some(Box::new(d))
+        } else {
+            None
+        };
 
         let (stop_timer, stopped) = mpsc::channel::<()>();
         let interval = config.full_rescan;
@@ -162,7 +172,7 @@ impl FolderWatcher {
             .map_err(|e| notify::Error::generic(&e.to_string()))?;
 
         Ok(Self {
-            _debouncer: Box::new(debouncer),
+            _debouncer: debouncer,
             stop_timer,
         })
     }

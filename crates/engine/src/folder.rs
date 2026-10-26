@@ -28,6 +28,7 @@ use bsync_fs::{
 };
 use bsync_index::{Index, LocalEntry};
 
+use crate::merge::{Bases, MERGE_MAX, is_text, merge_text};
 use crate::scan::{ScanContext, ScanStats, new_version, stat_of};
 use crate::{EngineError, Result};
 
@@ -89,6 +90,8 @@ pub struct SyncStats {
     pub chunks_reused: u64,
     pub chunks_fetched: u64,
     pub conflicts: u64,
+    /// Concurrent text edits merged instead of kept as conflict copies.
+    pub merged: u64,
     pub blocked: Vec<(String, String)>,
 }
 
@@ -855,6 +858,16 @@ impl Folder {
             return Ok(Outcome::LocalChanged);
         }
 
+        // 2b. Concurrent edits of a text file: merge them if they touch
+        // different lines, instead of keeping a conflict copy.
+        if conflict
+            && let Some(loser) = entry.map(|e| e.record.clone())
+            && let Some(outcome) = self.try_merge(rel, &tmp, &loser, record, stats)?
+        {
+            cleanup(self);
+            return Ok(outcome);
+        }
+
         // 3. Keep the old content.
         let result = (|| -> Result<()> {
             if entry.is_some_and(|e| !e.record.deleted) {
@@ -878,7 +891,99 @@ impl Folder {
 
         let meta = self.fs.metadata(&self.abs(rel))?;
         self.index.put(record, Some(stat_of(&meta)))?;
+        if record.size <= MERGE_MAX
+            && let Ok(content) = self.fs.read(&self.abs(rel))
+            && Hash::of(&content) == record.hash
+        {
+            self.bases().store(&record.hash, &content)?;
+        }
         Ok(Outcome::Done)
+    }
+
+    fn bases(&self) -> Bases<'_> {
+        Bases::new(&*self.fs, &self.root)
+    }
+
+    /// Delete stored merge bases that no current version leads back to.
+    pub fn prune_bases(&self) -> Result<usize> {
+        let mut records: Vec<FileRecord> =
+            self.index.all()?.into_iter().map(|e| e.record).collect();
+        for path in self.index.remote_paths()? {
+            records.extend(self.index.remote(&path)?.into_iter().map(|(_, r)| r));
+        }
+        Ok(self.bases().prune(&records)?)
+    }
+
+    /// Three-way merge of the local version `loser` (on disk at `rel`) and
+    /// the incoming `winner` (assembled in `tmp`). On success the merged
+    /// text replaces the file as a new local version that has seen both;
+    /// the local bytes go to the versions folder.
+    fn try_merge(
+        &mut self,
+        rel: &str,
+        tmp: &str,
+        loser: &FileRecord,
+        winner: &FileRecord,
+        stats: &mut SyncStats,
+    ) -> Result<Option<Outcome>> {
+        if loser.size > MERGE_MAX || winner.size > MERGE_MAX {
+            return Ok(None);
+        }
+        let ours = self.fs.read(&self.abs(rel))?;
+        let theirs = self.fs.read(&self.abs(tmp))?;
+        if Hash::of(&ours) != loser.hash || !is_text(&ours) || !is_text(&theirs) {
+            return Ok(None);
+        }
+        let Some(base) = self.bases().common_ancestor(loser, winner) else {
+            tracing::debug!(path = %rel, "not merged: no common ancestor known");
+            return Ok(None);
+        };
+        let Some(merged) = merge_text(&base, &ours, &theirs) else {
+            tracing::debug!(path = %rel, "not merged: overlapping edits");
+            return Ok(None);
+        };
+        let tmp2 = self.next_temp_name(rel);
+        self.fs.create_new(&self.abs(&tmp2), &merged)?;
+        let swap = (|| -> Result<()> {
+            self.archive_copy(rel)?;
+            self.fs.rename(&self.abs(&tmp2), &self.abs(rel))?;
+            Ok(())
+        })();
+        if let Err(e) = swap {
+            let _ = self.fs.remove_file(&self.abs(&tmp2));
+            return Err(e);
+        }
+        let meta = self.fs.metadata(&self.abs(rel))?;
+        let chunked = bsync_core::chunk_bytes(&merged, self.params);
+        let counter = self.own_counter()?;
+        let r = FileRecord {
+            path: rel.to_owned(),
+            kind: EntryKind::File,
+            deleted: false,
+            size: chunked.size,
+            mtime_ns: mtime_ns(meta.modified),
+            version: loser
+                .version
+                .merged(&winner.version)
+                .incremented_at_least(self.device, counter),
+            modified_by: self.device,
+            hash: chunked.hash,
+            chunks: chunked.chunks,
+            // Descends from both; the winner's line first.
+            ancestors: winner
+                .ancestry_for_child()
+                .into_iter()
+                .chain(std::iter::once(loser.hash))
+                .take(bsync_core::MAX_ANCESTORS)
+                .collect(),
+        };
+        self.index.put(&r, Some(stat_of(&meta)))?;
+        let bases = self.bases();
+        bases.store(&winner.hash, &theirs)?;
+        bases.store(&r.hash, &merged)?;
+        stats.merged += 1;
+        tracing::info!(path = %rel, "merged concurrent edits");
+        Ok(Some(Outcome::Done))
     }
 
     /// Write `record`'s content to `tmp`. Returns `Some(outcome)` if it could

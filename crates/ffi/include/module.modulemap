@@ -1,0 +1,4 @@
+module BsyncFFI {
+    header "bsync.h"
+    export *
+}

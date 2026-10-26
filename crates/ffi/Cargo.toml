@@ -1,0 +1,29 @@
+[package]
+name = "bsync-ffi"
+description = "Runs the BetterSync daemon inside another app (Android first): a C ABI and JNI entry points."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+bsync-core.workspace = true
+bsync-fs.workspace = true
+bsyncd.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

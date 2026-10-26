@@ -17,6 +17,8 @@ bsync-proto = { path = "crates/proto" }
 bsync-net = { path = "crates/net" }
 bsync-engine = { path = "crates/engine" }
 bsync-sim = { path = "crates/sim" }
+bsync-ffi = { path = "crates/ffi" }
+bsync-cloudfiles = { path = "crates/cloudfiles" }
 
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
@@ -35,6 +37,7 @@ x509-parser = "0.18"
 mdns-sd = "0.21"
 unicode-normalization = "0.1"
 ignore = "0.4"
+diffy = "0.4"
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
 axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json"] }

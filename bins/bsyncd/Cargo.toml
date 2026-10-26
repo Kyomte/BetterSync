@@ -15,6 +15,7 @@ bsync-fs.workspace = true
 bsync-proto.workspace = true
 bsync-net.workspace = true
 bsync-engine.workspace = true
+bsync-cloudfiles.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -26,6 +27,7 @@ tracing-appender.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+bsync-cloudfiles.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 

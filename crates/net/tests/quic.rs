@@ -314,3 +314,24 @@ async fn upload_and_download_limits_slow_transfers() {
     }
     assert!(start.elapsed() < Duration::from_millis(1000));
 }
+
+#[tokio::test]
+async fn dialer_finds_a_device_among_tailnet_machines() {
+    let mut a = Peer::new("a");
+    let mut b = Peer::new("b");
+    let c = Peer::new("c"); // another machine on the tailnet, not b
+    a.pair(&b);
+    b.pair(&a);
+    let dialer = bsync_net::Dialer::start(a.net.clone());
+    dialer.set_devices([(b.id(), vec![])].into()); // no address configured
+    dialer.set_tailnet(vec![
+        c.net.local_addr().unwrap(),
+        b.net.local_addr().unwrap(),
+    ]);
+    let got = tokio::time::timeout(Duration::from_secs(15), b.events.recv()).await;
+    assert!(
+        matches!(got, Ok(Some(NetEvent::Connected { .. }))),
+        "{got:?}"
+    );
+    assert!(matches!(a.next().await, Some(NetEvent::Connected { peer, .. }) if peer == b.id()));
+}

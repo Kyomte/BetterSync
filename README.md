@@ -28,8 +28,9 @@ On mobile data (Windows metered connections, macOS hotspots or Low Data
 Mode) files over 50 MB wait for an unmetered network; see
 `bsync bandwidth --help` for that threshold and upload/download limits.
 
-Devices on the same network also find each other via mDNS, so `--addr` is
-only needed for Tailscale or other routed networks. Put gitignore-style
+Devices on the same network find each other via mDNS, and devices on your
+tailnet are found through `tailscale status` (when Tailscale is installed),
+so `--addr` is only needed for other routed networks or non-default ports. Put gitignore-style
 patterns in `.bsyncignore` at the folder root to keep files local.
 
 ## Resource use when idle
@@ -45,3 +46,22 @@ Windows and macOS numbers (including `bsync-tray`) are still to be recorded
 — see docs/manual-checks.md.
 
 Targets Windows and macOS (Linux works too). Written in Rust.
+
+## Android
+
+`android/` is an Android app that runs the daemon in a foreground service
+and shows the status page. CI builds a debug APK (workflow "Android",
+artifact `bettersync-debug-apk`). To build locally you need the Android SDK
+and NDK:
+
+```sh
+rustup target add aarch64-linux-android x86_64-linux-android
+cargo install cargo-ndk
+cargo ndk -t arm64-v8a -t x86_64 -o android/app/src/main/jniLibs build --release -p bsync-ffi
+gradle -p android assembleDebug
+```
+
+## iPhone / iPad
+
+`ios/` is the iOS app (syncs while open and when iOS grants background
+time; not always-on). See docs/ios.md for what to expect and how to build.

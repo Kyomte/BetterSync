@@ -17,6 +17,6 @@ mod vv;
 pub use chunk::{ChunkParams, ChunkedFile, chunk_bytes, chunk_reader};
 pub use hash::Hash;
 pub use id::{DeviceId, FolderId};
-pub use record::{ChunkRef, EntryKind, FileRecord, is_valid_rel_path, parent_of};
+pub use record::{ChunkRef, EntryKind, FileRecord, MAX_ANCESTORS, is_valid_rel_path, parent_of};
 pub use time::format_utc_compact;
 pub use vv::{Causality, VersionVector};

@@ -11,6 +11,7 @@ mod identity;
 pub mod metered;
 pub mod quic;
 pub mod rate;
+pub mod tailscale;
 pub mod tls;
 
 pub use dialer::Dialer;

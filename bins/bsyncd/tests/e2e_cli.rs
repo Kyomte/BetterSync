@@ -19,15 +19,18 @@ fn bin(name: &str) -> PathBuf {
     p.join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
 }
 
+/// Build `bsync` once per run, even if an older binary exists: running a
+/// stale one tests old code.
 fn ensure_built() {
-    if !bin("bsync").exists() {
+    static BUILT: std::sync::Once = std::sync::Once::new();
+    BUILT.call_once(|| {
         let ok = Command::new(env!("CARGO"))
             .args(["build", "-p", "bsync"])
             .status()
             .unwrap()
             .success();
         assert!(ok, "building bsync failed");
-    }
+    });
 }
 
 fn cli(dir: &Path, args: &[&str]) -> String {
@@ -198,6 +201,10 @@ fn two_daemons_through_the_cli() {
     let parsed: bsyncd::api::StatusDto = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed.device_id, id_b);
     assert_eq!(cli(&cb, &["conflicts"]).trim(), "No conflicts.");
+    let synced = fb.join("while-paused.txt");
+    eventually(20, "path-status says synced", || {
+        cli(&cb, &["path-status", synced.to_str().unwrap()]).starts_with("synced\t")
+    });
 
     // A wrong token is refused.
     let addr = std::fs::read_to_string(cb.join("api.addr")).unwrap();

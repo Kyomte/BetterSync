@@ -2,6 +2,7 @@
 //! process. The `bsyncd` binary is a thin wrapper.
 
 pub mod api;
+mod badges;
 pub mod config;
 pub mod daemon;
 mod ui;

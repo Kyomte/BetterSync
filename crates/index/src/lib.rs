@@ -99,7 +99,45 @@ fn encode(record: &FileRecord) -> Result<Vec<u8>> {
 }
 
 fn decode(blob: &[u8]) -> Result<FileRecord> {
-    Ok(postcard::from_bytes(blob)?)
+    match postcard::from_bytes(blob) {
+        Ok(r) => Ok(r),
+        // Written before records had `ancestors` (protocol 1): the field
+        // is missing at the end.
+        Err(e) => postcard::from_bytes::<RecordV1>(blob)
+            .map(RecordV1::upgrade)
+            .map_err(|_| e.into()),
+    }
+}
+
+/// [`FileRecord`] as stored before `ancestors` existed.
+#[derive(serde::Deserialize)]
+struct RecordV1 {
+    path: String,
+    kind: bsync_core::EntryKind,
+    deleted: bool,
+    size: u64,
+    mtime_ns: i64,
+    version: bsync_core::VersionVector,
+    modified_by: DeviceId,
+    hash: Hash,
+    chunks: Vec<bsync_core::ChunkRef>,
+}
+
+impl RecordV1 {
+    fn upgrade(self) -> FileRecord {
+        FileRecord {
+            path: self.path,
+            kind: self.kind,
+            deleted: self.deleted,
+            size: self.size,
+            mtime_ns: self.mtime_ns,
+            version: self.version,
+            modified_by: self.modified_by,
+            hash: self.hash,
+            chunks: self.chunks,
+            ancestors: Vec::new(),
+        }
+    }
 }
 
 fn to_i64(v: u64) -> i64 {
@@ -493,6 +531,7 @@ mod tests {
                     len,
                 })
                 .collect(),
+            ancestors: Vec::new(),
         }
     }
 
@@ -613,6 +652,36 @@ mod tests {
         assert_eq!(idx.next_own_counter(0).unwrap(), 2);
         assert_eq!(idx.next_own_counter(100).unwrap(), 100);
         assert_eq!(idx.next_own_counter(50).unwrap(), 101);
+    }
+
+    #[test]
+    fn records_written_before_ancestors_existed_still_decode() {
+        #[derive(serde::Serialize)]
+        struct Old<'a> {
+            path: &'a str,
+            kind: bsync_core::EntryKind,
+            deleted: bool,
+            size: u64,
+            mtime_ns: i64,
+            version: VersionVector,
+            modified_by: DeviceId,
+            hash: Hash,
+            chunks: Vec<ChunkRef>,
+        }
+        let r = file("old.txt", &[(1, 10)]);
+        let blob = postcard::to_stdvec(&Old {
+            path: &r.path,
+            kind: r.kind,
+            deleted: r.deleted,
+            size: r.size,
+            mtime_ns: r.mtime_ns,
+            version: r.version.clone(),
+            modified_by: r.modified_by,
+            hash: r.hash,
+            chunks: r.chunks.clone(),
+        })
+        .unwrap();
+        assert_eq!(decode(&blob).unwrap(), r);
     }
 
     #[test]

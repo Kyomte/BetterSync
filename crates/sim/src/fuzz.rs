@@ -24,6 +24,10 @@ pub struct FuzzConfig {
     pub min_nodes: usize,
     pub max_nodes: usize,
     pub steps: usize,
+    /// Write text files edited line by line (so concurrent edits get
+    /// merged) and check for lost edits per line; otherwise write binary
+    /// files and check whole contents.
+    pub text: bool,
 }
 
 impl Default for FuzzConfig {
@@ -32,6 +36,7 @@ impl Default for FuzzConfig {
             min_nodes: 3,
             max_nodes: 5,
             steps: 300,
+            text: false,
         }
     }
 }
@@ -42,6 +47,7 @@ const NAMES: [&str; 4] = ["x.txt", "y.txt", "z", "w.bin"];
 
 struct Run {
     c: Cluster,
+    text: bool,
     /// Every content ever written by a user op.
     written: BTreeSet<Vec<u8>>,
     /// Contents a user replaced or deleted while looking at them.
@@ -67,16 +73,75 @@ impl Run {
         &self.c.nodes[n].fs
     }
 
+    /// What counts as one edit: a whole binary content, or one line of a
+    /// text file.
+    fn units(&self, content: &[u8]) -> Vec<Vec<u8>> {
+        if self.text {
+            content
+                .split_inclusive(|&b| b == b'\n')
+                .map(<[u8]>::to_vec)
+                .collect()
+        } else {
+            vec![content.to_vec()]
+        }
+    }
+
+    /// New content for a file whose current content is `old`.
+    fn next_content(&mut self, old: Option<&[u8]>) -> Vec<u8> {
+        if !self.text {
+            return self.content();
+        }
+        self.counter += 1;
+        let line = format!("s{}w{}\n", self.seed, self.counter).into_bytes();
+        let mut lines = match old {
+            Some(o) => self.units(o),
+            // New files start with a few lines, so concurrent edits often
+            // touch different lines and get merged.
+            None => (0..8)
+                .map(|i| format!("s{}w{}l{i}\n", self.seed, self.counter).into_bytes())
+                .collect(),
+        };
+        match self.c.rng.below(10) {
+            // Delete a line.
+            0 if !lines.is_empty() => {
+                let i = self.c.rng.index(lines.len());
+                lines.remove(i);
+            }
+            // Replace a line.
+            1 | 2 if !lines.is_empty() => {
+                let i = self.c.rng.index(lines.len());
+                lines[i] = line;
+            }
+            // Insert a line somewhere.
+            _ => {
+                let i = self.c.rng.index(lines.len() + 1);
+                lines.insert(i, line);
+            }
+        }
+        lines.concat()
+    }
+
+    /// Record that a user replaced `old` with `new` on a device.
+    fn supersede(&mut self, old: &[u8], new: &[u8]) {
+        let kept: BTreeSet<Vec<u8>> = self.units(new).into_iter().collect();
+        for u in self.units(old) {
+            if !kept.contains(&u) {
+                self.superseded.insert(u);
+            }
+        }
+    }
+
     fn content(&mut self) -> Vec<u8> {
         self.counter += 1;
-        let mut data = format!("seed {} write {}\n", self.seed, self.counter).into_bytes();
+        // Leading 0xFF: never valid text, so binary runs never merge.
+        let mut data = vec![0xFF];
+        data.extend(format!("seed {} write {}\n", self.seed, self.counter).into_bytes());
         let extra = match self.c.rng.below(10) {
             0 => 0,
             1..=6 => self.c.rng.index(200),
             _ => self.c.rng.index(4000),
         };
         data.extend(self.c.rng.bytes(extra));
-        self.written.insert(data.clone());
         data
     }
 
@@ -140,9 +205,23 @@ impl Run {
                 }
                 let path = Cluster::path(&rel);
                 let old = self.fs(n).read(&path).ok();
-                let data = self.content();
+                let data = self.next_content(old.as_deref());
                 if self.fs(n).write_in_place(&path, &data).is_ok() {
-                    self.superseded.extend(old);
+                    // Only now does the edit exist.
+                    let before: BTreeSet<Vec<u8>> = old
+                        .as_deref()
+                        .map(|o| self.units(o))
+                        .unwrap_or_default()
+                        .into_iter()
+                        .collect();
+                    for u in self.units(&data) {
+                        if !before.contains(&u) {
+                            self.written.insert(u);
+                        }
+                    }
+                    if let Some(old) = old {
+                        self.supersede(&old, &data);
+                    }
                     self.op(format!("n{n} write {rel} #{}", self.counter));
                     vec![rel]
                 } else {
@@ -155,7 +234,7 @@ impl Run {
                     return vec![];
                 };
                 if self.fs(n).remove_file(&Cluster::path(&rel)).is_ok() {
-                    self.superseded.insert(data.to_vec());
+                    self.supersede(&data, &[]);
                     self.op(format!("n{n} rm {rel}"));
                     vec![rel]
                 } else {
@@ -177,7 +256,9 @@ impl Run {
                     .rename(&Cluster::path(&from), &Cluster::path(&to))
                     .is_ok()
                 {
-                    self.superseded.extend(replaced);
+                    if let Some(r) = replaced {
+                        self.supersede(&r, &[]);
+                    }
                     self.op(format!("n{n} mv {from} {to}"));
                     vec![from, to]
                 } else {
@@ -206,7 +287,7 @@ impl Run {
                         self.fs(n).remove_dir(&p).is_ok()
                     };
                     if ok && let Some(d) = v {
-                        self.superseded.insert(d.to_vec());
+                        self.supersede(d, &[]);
                     }
                 }
                 let _ = self.fs(n).remove_dir(&Cluster::path(dir));
@@ -342,8 +423,10 @@ impl Run {
                 return Err(format!("temp file left behind: {k}"));
             }
         }
-        let present: BTreeSet<Vec<u8>> =
-            files_of(&t0).into_iter().map(|(_, d)| d.to_vec()).collect();
+        let present: BTreeSet<Vec<u8>> = files_of(&t0)
+            .into_iter()
+            .flat_map(|(_, d)| self.units(&d))
+            .collect();
         for w in self.written.difference(&self.superseded) {
             if !present.contains(w) {
                 let head = String::from_utf8_lossy(&w[..w.len().min(24)]).into_owned();
@@ -400,6 +483,7 @@ pub fn run(seed: u64, config: FuzzConfig) -> Result<(), String> {
     let nodes = config.min_nodes + setup.below(span) as usize;
     let mut run = Run {
         c: Cluster::new(seed, nodes),
+        text: config.text,
         written: BTreeSet::new(),
         superseded: BTreeSet::new(),
         counter: 0,

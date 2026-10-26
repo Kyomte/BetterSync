@@ -18,7 +18,11 @@ fn one_seed() {
         .without_time()
         .with_target(false)
         .try_init();
-    if let Err(e) = run(seed, FuzzConfig::default()) {
+    let config = FuzzConfig {
+        text: std::env::var_os("BSYNC_FUZZ_TEXT").is_some(),
+        ..FuzzConfig::default()
+    };
+    if let Err(e) = run(seed, config) {
         panic!("{e}");
     }
 }

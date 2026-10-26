@@ -5,6 +5,7 @@
 //! arrives (network, file change, control request) or an engine deadline
 //! passes — there is no polling loop.
 
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -13,12 +14,13 @@ use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
-use bsync_core::{ChunkParams, DeviceId};
-use bsync_engine::{EngineConfig, EngineStatus, Folder, SyncEngine, SystemClock};
+use bsync_core::{ChunkParams, DeviceId, FolderId};
+use bsync_engine::{EngineConfig, EngineStatus, Folder, PathState, SyncEngine, SystemClock};
 use bsync_fs::{FolderWatcher, StdFs, WatchConfig, WatchEvent};
 use bsync_index::Index;
 use bsync_net::{Dialer, Discovery, Identity, NetEvent, PairedSet, QuicNet};
 
+use crate::badges::Badges;
 use crate::config::{Config, FolderConfig, MeteredMode};
 
 /// A request to the engine thread, answered on `reply`.
@@ -28,6 +30,8 @@ pub enum Control {
     Reload(mpsc::Sender<Result<(), String>>),
     Pause(String, bool, mpsc::Sender<Result<(), String>>),
     Rescan(String, mpsc::Sender<Result<(), String>>),
+    /// Badge state of absolute paths (stretch goal S1).
+    PathStatus(Vec<PathBuf>, mpsc::Sender<Vec<PathStatus>>),
 }
 
 impl std::fmt::Debug for Control {
@@ -56,6 +60,56 @@ pub struct FolderStatus {
     /// Local entries (files + dirs, excluding deleted).
     pub local_entries: u64,
     pub conflicts: Vec<String>,
+}
+
+/// The sync state of one path, for file manager badges.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathStatus {
+    pub path: PathBuf,
+    /// The folder holding it; `None` if no synced folder does.
+    pub folder: Option<String>,
+    /// "synced", "syncing", "conflict", "blocked", "ignored", "unknown",
+    /// "paused" or "error".
+    pub state: String,
+    pub reason: Option<String>,
+}
+
+/// The folder (index into `roots`) holding absolute path `abs`, and its
+/// record path there. The innermost folder wins if folders are nested.
+pub fn locate(roots: &[&Path], abs: &Path) -> Option<(usize, String)> {
+    let rel_of = |root: &Path| -> Option<String> {
+        let rest: PathBuf = abs
+            .strip_prefix(root)
+            .map(Path::to_path_buf)
+            .ok()
+            .or_else(|| {
+                // Windows and macOS paths are usually case-insensitive.
+                if cfg!(any(windows, target_os = "macos")) {
+                    let (a, r) = (abs.to_string_lossy(), root.to_string_lossy());
+                    let tail = a.get(r.len()..)?;
+                    let head = a.get(..r.len())?;
+                    (head.to_lowercase() == r.to_lowercase()
+                        && (tail.is_empty() || tail.starts_with(['/', '\\'])))
+                    .then(|| PathBuf::from(tail.trim_start_matches(['/', '\\'])))
+                } else {
+                    None
+                }
+            })?;
+        let parts: Option<Vec<&str>> = rest
+            .components()
+            .map(|c| match c {
+                std::path::Component::Normal(n) => n.to_str(),
+                _ => None,
+            })
+            .collect();
+        Some(parts?.join("/"))
+    };
+    roots
+        .iter()
+        .enumerate()
+        .filter_map(|(i, root)| Some((i, rel_of(root)?, root.components().count())))
+        .max_by_key(|(_, _, depth)| *depth)
+        .map(|(i, rel, _)| (i, rel))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +157,7 @@ struct FolderRuntime {
     engine: Option<SyncEngine>,
     error: Option<String>,
     _watcher: Option<FolderWatcher>,
+    badges: Option<Badges>,
 }
 
 struct EngineThread {
@@ -116,6 +171,8 @@ struct EngineThread {
     dialer: Arc<Dialer>,
     /// What the OS last said (Auto mode).
     os_metered: bool,
+    /// Folder offers already accepted, waiting for the reload.
+    accepted: BTreeSet<(DeviceId, String)>,
 }
 
 /// A running daemon.
@@ -128,6 +185,7 @@ pub struct Daemon {
     local_addr: SocketAddr,
     config_dir: PathBuf,
     api_addr: SocketAddr,
+    dialer: Arc<Dialer>,
     _discovery: Option<Discovery>,
     _metered: Option<bsync_net::metered::MeteredWatcher>,
 }
@@ -140,6 +198,9 @@ impl std::fmt::Debug for Daemon {
             .finish_non_exhaustive()
     }
 }
+
+/// How often the tailnet's machine list is re-read.
+const TAILNET_REFRESH: Duration = Duration::from_secs(300);
 
 /// What the folder's chunking uses (fixed for now).
 const CHUNKS: ChunkParams = ChunkParams::DEFAULT;
@@ -220,6 +281,27 @@ impl Daemon {
             None
         };
 
+        // Machines on the tailnet, refreshed every few minutes.
+        if config.tailscale_discovery {
+            let dialer = Arc::clone(&dialer);
+            let port = config.tailscale_port;
+            runtime.spawn(async move {
+                loop {
+                    match tokio::task::spawn_blocking(move || bsync_net::tailscale::query(port))
+                        .await
+                    {
+                        Ok(Some(addrs)) => dialer.set_tailnet(addrs),
+                        Ok(None) => {
+                            tracing::debug!("tailscale not available; tailnet discovery idle");
+                            return;
+                        }
+                        Err(_) => return,
+                    }
+                    tokio::time::sleep(TAILNET_REFRESH).await;
+                }
+            });
+        }
+
         // Follow the OS's metered-network state (Windows, macOS).
         let metered_watcher = {
             let tx = Mutex::new(events_tx.clone());
@@ -248,6 +330,7 @@ impl Daemon {
             peers_seen: Default::default(),
             dialer: Arc::clone(&dialer),
             os_metered: false,
+            accepted: BTreeSet::new(),
         };
         thread_state.open_folders(watch);
         let thread = std::thread::Builder::new()
@@ -263,6 +346,7 @@ impl Daemon {
             local_addr,
             config_dir: config_dir.to_path_buf(),
             api_addr,
+            dialer,
             _discovery: discovery,
             _metered: metered_watcher,
         })
@@ -316,6 +400,34 @@ impl Daemon {
             .map_err(anyhow::Error::msg)
     }
 
+    /// Addresses of a device found by the host app's own LAN discovery
+    /// (iOS, where Bonjour must go through the system).
+    pub fn discovered(&self, device: DeviceId, addrs: Vec<SocketAddr>) {
+        self.dialer.discovered(device, addrs);
+    }
+
+    /// The network may have changed (e.g. a phone app resumed): reconnect
+    /// to paired devices now rather than after the backoff.
+    pub fn network_changed(&self) {
+        self.dialer.retry_now();
+    }
+
+    /// Ask every folder to rescan, without waiting (e.g. a phone app came
+    /// back to the foreground: other apps may have changed files).
+    pub fn rescan_all(&self) {
+        let Ok(config) = Config::load(&self.config_dir) else {
+            return;
+        };
+        for f in config.folders {
+            let (tx, _rx) = mpsc::channel();
+            let _ = self.events.send(Event::Control(Control::Rescan(f.id, tx)));
+        }
+    }
+
+    pub fn path_status(&self, paths: Vec<PathBuf>) -> Result<Vec<PathStatus>> {
+        self.ask(|tx| Control::PathStatus(paths, tx))
+    }
+
     /// A sender for control requests (used by the HTTP API).
     pub fn events(&self) -> mpsc::Sender<Event> {
         self.events.clone()
@@ -361,6 +473,11 @@ impl EngineThread {
     fn open_folder(&self, cfg: FolderConfig, watch: WatchConfig) -> FolderRuntime {
         match self.try_open_folder(&cfg, watch) {
             Ok((engine, watcher)) => FolderRuntime {
+                badges: self
+                    .config
+                    .explorer_badges
+                    .then(|| Badges::start(&cfg.path, &cfg.id))
+                    .flatten(),
                 config: cfg,
                 engine: Some(engine),
                 error: None,
@@ -373,6 +490,7 @@ impl EngineThread {
                     engine: None,
                     error: Some(format!("{e:#}")),
                     _watcher: None,
+                    badges: None,
                 }
             }
         }
@@ -407,9 +525,13 @@ impl EngineThread {
             CHUNKS,
             index,
         );
+        let mut engine_config = EngineConfig::new(cfg.folder_id(), cfg.shared_with());
+        engine_config.versions_max_age =
+            Duration::from_secs(self.config.versions.max_days * 86_400);
+        engine_config.versions_max_bytes = self.config.versions.max_gb * 1024 * 1024 * 1024;
         let mut engine = SyncEngine::new(
             folder,
-            EngineConfig::new(cfg.folder_id(), cfg.shared_with()),
+            engine_config,
             self.net.transport(),
             Arc::new(SystemClock),
             random_u64,
@@ -443,16 +565,19 @@ impl EngineThread {
                 peer,
                 name: String::new(),
                 addr: SocketAddr::from(([0, 0, 0, 0], 0)),
+                folders: Vec::new(),
             });
         }
         self.apply_bandwidth();
         // Work found by the startup scans (no event may come for a while).
         self.tick_all();
+        let mut badges_waiting = self.update_badges();
         loop {
             let deadline = self
                 .folders
                 .iter()
                 .filter_map(|f| f.engine.as_ref()?.next_deadline())
+                .chain(badges_waiting.then(SystemTime::now))
                 .min();
             let event = match deadline {
                 None => events.recv().map_err(|_| RecvTimeoutError::Disconnected),
@@ -489,7 +614,19 @@ impl EngineThread {
                 }
             }
             self.tick_all();
+            badges_waiting = self.update_badges();
         }
+    }
+
+    /// True if some badges are still waiting for an update.
+    fn update_badges(&mut self) -> bool {
+        let mut waiting = false;
+        for f in &mut self.folders {
+            if let (Some(b), Some(e)) = (f.badges.as_mut(), f.engine.as_mut()) {
+                waiting |= b.update(e);
+            }
+        }
+        waiting
     }
 
     /// The effective metered state: configuration first, then the OS.
@@ -530,8 +667,16 @@ impl EngineThread {
 
     fn on_net(&mut self, event: NetEvent) {
         match event {
-            NetEvent::Connected { peer, name, addr } => {
+            NetEvent::Connected {
+                peer,
+                name,
+                addr,
+                folders,
+            } => {
                 tracing::info!(%peer, %name, %addr, "connected");
+                for f in &folders {
+                    self.offered(peer, f);
+                }
                 if !name.is_empty() {
                     self.peers_seen.insert(peer, (name, addr));
                 }
@@ -555,6 +700,11 @@ impl EngineThread {
                 let Some(folder) = msg.folder().cloned() else {
                     return;
                 };
+                if !self.folders.iter().any(|f| f.config.id == folder.0) {
+                    // A folder added on the peer after it connected.
+                    self.offered(peer, &folder);
+                    return;
+                }
                 for f in &mut self.folders {
                     if f.config.id != folder.0 {
                         continue;
@@ -567,6 +717,56 @@ impl EngineThread {
                     return;
                 }
             }
+        }
+    }
+
+    /// `peer` syncs `folder` with us. An always-on peer accepts it: creates
+    /// the folder under its root (or shares an existing one with the peer)
+    /// and reloads.
+    fn offered(&mut self, peer: DeviceId, folder: &FolderId) {
+        let existing = self.config.folders.iter().find(|f| f.id == folder.0);
+        if existing.is_some_and(|f| f.shared_with().contains(&peer)) {
+            return;
+        }
+        if !self.accepted.insert((peer, folder.0.clone())) {
+            return; // already being set up
+        }
+        if !self.config.always_on.auto_accept_folders {
+            if existing.is_none() {
+                tracing::info!(%peer, folder = %folder, "peer offers a folder that is not set up here");
+            }
+            return;
+        }
+        let path = if existing.is_some() {
+            None
+        } else {
+            match self.config.always_on.path_for(&folder.0) {
+                Some(p) => Some(p),
+                None => {
+                    tracing::warn!(folder = %folder, "cannot accept folder: no always_on.folders_root, or unusable folder ID");
+                    return;
+                }
+            }
+        };
+        let result = (|| -> Result<()> {
+            let mut cfg = Config::load(&self.config_dir)?;
+            match &path {
+                Some(p) => {
+                    std::fs::create_dir_all(p)?;
+                    cfg.add_folder(&folder.0, p.clone(), &[peer])?;
+                }
+                None => cfg.share_folder(&folder.0, peer)?,
+            }
+            cfg.save(&self.config_dir)
+        })();
+        match result {
+            Ok(()) => {
+                tracing::info!(%peer, folder = %folder, "accepted folder");
+                // Picked up on the next loop iteration.
+                let (tx, _rx) = mpsc::channel();
+                let _ = self.events_tx.send(Event::Control(Control::Reload(tx)));
+            }
+            Err(e) => tracing::error!(folder = %folder, "accepting folder failed: {e:#}"),
         }
     }
 
@@ -688,6 +888,42 @@ impl EngineThread {
                 };
                 let _ = reply.send(r);
             }
+            Control::PathStatus(paths, reply) => {
+                let _ = reply.send(paths.into_iter().map(|p| self.path_status(p)).collect());
+            }
+        }
+    }
+
+    fn path_status(&self, path: PathBuf) -> PathStatus {
+        let roots: Vec<&Path> = self
+            .folders
+            .iter()
+            .map(|f| f.config.path.as_path())
+            .collect();
+        let Some((i, rel)) = locate(&roots, &path) else {
+            return PathStatus {
+                path,
+                folder: None,
+                state: "unknown".into(),
+                reason: None,
+            };
+        };
+        let f = &self.folders[i];
+        let (state, reason) = match &f.engine {
+            None => ("error".into(), f.error.clone()),
+            Some(e) => match e.path_state(&rel) {
+                // Paused folders keep their last state on disk, but nothing moves.
+                Ok(PathState::Syncing) if e.is_paused() => ("paused".into(), None),
+                Ok(PathState::Blocked(why)) => ("blocked".into(), Some(why)),
+                Ok(s) => (s.as_str().into(), None),
+                Err(err) => ("error".into(), Some(err.to_string())),
+            },
+        };
+        PathStatus {
+            path,
+            folder: Some(f.config.id.clone()),
+            state,
+            reason,
         }
     }
 
@@ -741,6 +977,12 @@ impl EngineThread {
                 };
                 self.folders.push(f);
             }
+            // Folders no longer synced lose their Explorer registration.
+            for f in previous.iter_mut() {
+                if f.badges.take().is_some() {
+                    Badges::remove(&f.config.path);
+                }
+            }
             drop(previous);
             let peers = self.net.connected_peers();
             for f in &mut self.folders {
@@ -755,5 +997,32 @@ impl EngineThread {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn locate_finds_the_innermost_folder() {
+        let outer = Path::new("/home/me/Sync");
+        let inner = Path::new("/home/me/Sync/Photos");
+        let roots = [outer, inner];
+        assert_eq!(
+            locate(&roots, Path::new("/home/me/Sync")),
+            Some((0, String::new()))
+        );
+        assert_eq!(
+            locate(&roots, Path::new("/home/me/Sync/a/b.txt")),
+            Some((0, "a/b.txt".into()))
+        );
+        assert_eq!(
+            locate(&roots, Path::new("/home/me/Sync/Photos/x.jpg")),
+            Some((1, "x.jpg".into()))
+        );
+        assert_eq!(locate(&roots, Path::new("/home/me/Synced/x")), None);
+        assert_eq!(locate(&roots, Path::new("/home/me/Sync/../x")), None);
+        assert_eq!(locate(&roots, Path::new("/elsewhere")), None);
     }
 }
