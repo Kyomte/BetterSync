@@ -11,6 +11,8 @@ publish.workspace = true
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
+bsync-core.workspace = true
+bsync-fs.workspace = true
 bsyncd.workspace = true
 serde_json.workspace = true
 tracing.workspace = true

@@ -180,6 +180,19 @@ impl Dialer {
         self.wake.notify_one();
     }
 
+    /// The network may have changed (a phone app came back to the
+    /// foreground): forget the backoff and try every device now.
+    pub fn retry_now(&self) {
+        {
+            let mut inner = self.lock();
+            for st in inner.devices.values_mut() {
+                st.failures = 0;
+                st.next_attempt = None;
+            }
+        }
+        self.wake.notify_one();
+    }
+
     /// A connection dropped (or anything else that warrants a look).
     pub fn poke(&self) {
         self.wake.notify_one();

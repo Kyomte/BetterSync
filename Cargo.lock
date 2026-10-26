@@ -308,6 +308,8 @@ dependencies = [
 name = "bsync-ffi"
 version = "0.1.0"
 dependencies = [
+ "bsync-core",
+ "bsync-fs",
  "bsyncd",
  "jni",
  "serde_json",

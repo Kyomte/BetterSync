@@ -1,0 +1,40 @@
+name: iOS
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  app:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain (from rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the Rust library (XCFramework)
+        run: ios/build-rust.sh
+      - name: Build the desktop daemon for the smoke test
+        run: cargo build -p bsyncd -p bsync
+      - run: brew install xcodegen
+      - run: xcodegen generate
+        working-directory: ios
+      - name: Build for devices (unsigned)
+        run: >
+          xcodebuild -project ios/BetterSync.xcodeproj -scheme BetterSync
+          -configuration Release -destination 'generic/platform=iOS'
+          -derivedDataPath ios/build CODE_SIGNING_ALLOWED=NO build
+      - name: Build for the simulator
+        run: >
+          xcodebuild -project ios/BetterSync.xcodeproj -scheme BetterSync
+          -configuration Debug -destination 'generic/platform=iOS Simulator'
+          -derivedDataPath ios/build CODE_SIGNING_ALLOWED=NO build
+      - name: Sync with a desktop daemon in the simulator
+        run: ios/ci-smoke.sh ios/build/Build/Products/Debug-iphonesimulator/BetterSync.app target/debug

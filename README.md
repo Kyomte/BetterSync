@@ -60,3 +60,8 @@ cargo install cargo-ndk
 cargo ndk -t arm64-v8a -t x86_64 -o android/app/src/main/jniLibs build --release -p bsync-ffi
 gradle -p android assembleDebug
 ```
+
+## iPhone / iPad
+
+`ios/` is the iOS app (syncs while open and when iOS grants background
+time; not always-on). See docs/ios.md for what to expect and how to build.

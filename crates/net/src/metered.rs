@@ -2,10 +2,10 @@
 //!
 //! - Windows: the internet connection profile's `NetworkCostType`
 //!   (WinRT), re-read whenever Windows reports a network change.
-//! - macOS: `NWPathMonitor` (Network.framework): `isExpensive` or
-//!   `isConstrained` (Low Data Mode).
+//! - macOS and iOS: `NWPathMonitor` (Network.framework): `isExpensive`
+//!   (cellular, a phone hotspot) or `isConstrained` (Low Data Mode).
 //! - Elsewhere there is no detection; the configuration decides.
-#![allow(unsafe_code)] // the macOS backend calls Network.framework's C API
+#![allow(unsafe_code)] // the Apple backend calls Network.framework's C API
 
 /// Windows `NetworkCostType`: Unknown 0, Unrestricted 1, Fixed 2, Variable 3.
 /// Fixed and variable plans are metered, and so is roaming or being over
@@ -18,7 +18,7 @@ pub fn is_metered_cost(cost_type: i32, roaming: bool, over_data_limit: bool) -> 
 pub struct MeteredWatcher {
     #[cfg(windows)]
     token: i64,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     _monitor: macos::Monitor,
 }
 
@@ -67,17 +67,17 @@ impl Drop for MeteredWatcher {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub fn watch(on_change: impl Fn(bool) + Send + Sync + 'static) -> Option<MeteredWatcher> {
     macos::Monitor::start(on_change).map(|monitor| MeteredWatcher { _monitor: monitor })
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "ios")))]
 pub fn watch(_on_change: impl Fn(bool) + Send + Sync + 'static) -> Option<MeteredWatcher> {
     None
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 mod macos {
     use std::ffi::{c_char, c_void};
 

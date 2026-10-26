@@ -1,0 +1,47 @@
+# XcodeGen spec: `xcodegen generate` (in ios/) writes BetterSync.xcodeproj.
+# Build the Rust library first: ios/build-rust.sh.
+name: BetterSync
+options:
+  bundleIdPrefix: com.bettersync
+  deploymentTarget:
+    iOS: "16.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  BetterSync:
+    type: application
+    platform: iOS
+    sources: [BetterSync]
+    dependencies:
+      - framework: BsyncFFI.xcframework
+        embed: false
+      - sdk: Network.framework
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.bettersync.app
+        TARGETED_DEVICE_FAMILY: "1,2"
+        # Set your team to run it on a device (a free Apple ID works).
+        DEVELOPMENT_TEAM: ""
+        CODE_SIGN_STYLE: Automatic
+    info:
+      path: BetterSync/Info.plist
+      properties:
+        CFBundleDisplayName: BetterSync
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        # Synced folders live in Documents: visible in Files › On My iPhone.
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        # The status page is served by the daemon on 127.0.0.1.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        NSLocalNetworkUsageDescription: BetterSync finds and syncs with your other devices on this network.
+        NSBonjourServices: [_bsync._udp]
+        UIBackgroundModes: [fetch, processing]
+        BGTaskSchedulerPermittedIdentifiers: [com.bettersync.refresh, com.bettersync.sync]

@@ -185,6 +185,7 @@ pub struct Daemon {
     local_addr: SocketAddr,
     config_dir: PathBuf,
     api_addr: SocketAddr,
+    dialer: Arc<Dialer>,
     _discovery: Option<Discovery>,
     _metered: Option<bsync_net::metered::MeteredWatcher>,
 }
@@ -345,6 +346,7 @@ impl Daemon {
             local_addr,
             config_dir: config_dir.to_path_buf(),
             api_addr,
+            dialer,
             _discovery: discovery,
             _metered: metered_watcher,
         })
@@ -396,6 +398,18 @@ impl Daemon {
     pub fn rescan(&self, folder: &str) -> Result<()> {
         self.ask(|tx| Control::Rescan(folder.to_owned(), tx))?
             .map_err(anyhow::Error::msg)
+    }
+
+    /// Addresses of a device found by the host app's own LAN discovery
+    /// (iOS, where Bonjour must go through the system).
+    pub fn discovered(&self, device: DeviceId, addrs: Vec<SocketAddr>) {
+        self.dialer.discovered(device, addrs);
+    }
+
+    /// The network may have changed (e.g. a phone app resumed): reconnect
+    /// to paired devices now rather than after the backoff.
+    pub fn network_changed(&self) {
+        self.dialer.retry_now();
     }
 
     pub fn path_status(&self, paths: Vec<PathBuf>) -> Result<Vec<PathStatus>> {

@@ -26,3 +26,4 @@ with date, OS version and result. CI only covers compile + automated tests.
 | S1 | `"explorer_badges": true` in config.json, restart: synced files show a green tick, a file being edited/synced shows the arrows, the folder shows arrows while a conflict copy exists | not yet run | n/a |
 | S1 | With badges on: editing in Word/VS Code, "Free up space" is refused or does nothing (file stays on disk), removing the folder from config removes the registration | not yet run | n/a |
 | S1 | `bsync path-status <file>` prints synced / syncing / conflict / blocked | not yet run | not yet run |
+| S3 | iPhone: build from Xcode with your Apple ID, pair with the PC over Wi-Fi (Bonjour, after allowing local network access), a folder shared from the PC appears in Files › On My iPhone › BetterSync; edits flow both ways while the app is open and finish within ~25 s after leaving it | n/a (iOS) | n/a (iOS) |
