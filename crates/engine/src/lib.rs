@@ -9,4 +9,4 @@ pub mod sync;
 
 pub use error::{EngineError, Result};
 pub use folder::{ChunkSource, Clock, Folder, NoChunks, Outcome, SyncStats, SystemClock};
-pub use sync::{EngineConfig, EngineStatus, SyncEngine};
+pub use sync::{EngineConfig, EngineStatus, PathState, SyncEngine, is_conflict_copy};

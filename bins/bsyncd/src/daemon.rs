@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use bsync_core::{ChunkParams, DeviceId, FolderId};
-use bsync_engine::{EngineConfig, EngineStatus, Folder, SyncEngine, SystemClock};
+use bsync_engine::{EngineConfig, EngineStatus, Folder, PathState, SyncEngine, SystemClock};
 use bsync_fs::{FolderWatcher, StdFs, WatchConfig, WatchEvent};
 use bsync_index::Index;
 use bsync_net::{Dialer, Discovery, Identity, NetEvent, PairedSet, QuicNet};
@@ -29,6 +29,8 @@ pub enum Control {
     Reload(mpsc::Sender<Result<(), String>>),
     Pause(String, bool, mpsc::Sender<Result<(), String>>),
     Rescan(String, mpsc::Sender<Result<(), String>>),
+    /// Badge state of absolute paths (stretch goal S1).
+    PathStatus(Vec<PathBuf>, mpsc::Sender<Vec<PathStatus>>),
 }
 
 impl std::fmt::Debug for Control {
@@ -57,6 +59,56 @@ pub struct FolderStatus {
     /// Local entries (files + dirs, excluding deleted).
     pub local_entries: u64,
     pub conflicts: Vec<String>,
+}
+
+/// The sync state of one path, for file manager badges.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathStatus {
+    pub path: PathBuf,
+    /// The folder holding it; `None` if no synced folder does.
+    pub folder: Option<String>,
+    /// "synced", "syncing", "conflict", "blocked", "ignored", "unknown",
+    /// "paused" or "error".
+    pub state: String,
+    pub reason: Option<String>,
+}
+
+/// The folder (index into `roots`) holding absolute path `abs`, and its
+/// record path there. The innermost folder wins if folders are nested.
+pub fn locate(roots: &[&Path], abs: &Path) -> Option<(usize, String)> {
+    let rel_of = |root: &Path| -> Option<String> {
+        let rest: PathBuf = abs
+            .strip_prefix(root)
+            .map(Path::to_path_buf)
+            .ok()
+            .or_else(|| {
+                // Windows and macOS paths are usually case-insensitive.
+                if cfg!(any(windows, target_os = "macos")) {
+                    let (a, r) = (abs.to_string_lossy(), root.to_string_lossy());
+                    let tail = a.get(r.len()..)?;
+                    let head = a.get(..r.len())?;
+                    (head.to_lowercase() == r.to_lowercase()
+                        && (tail.is_empty() || tail.starts_with(['/', '\\'])))
+                    .then(|| PathBuf::from(tail.trim_start_matches(['/', '\\'])))
+                } else {
+                    None
+                }
+            })?;
+        let parts: Option<Vec<&str>> = rest
+            .components()
+            .map(|c| match c {
+                std::path::Component::Normal(n) => n.to_str(),
+                _ => None,
+            })
+            .collect();
+        Some(parts?.join("/"))
+    };
+    roots
+        .iter()
+        .enumerate()
+        .filter_map(|(i, root)| Some((i, rel_of(root)?, root.components().count())))
+        .max_by_key(|(_, _, depth)| *depth)
+        .map(|(i, rel, _)| (i, rel))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -342,6 +394,10 @@ impl Daemon {
     pub fn rescan(&self, folder: &str) -> Result<()> {
         self.ask(|tx| Control::Rescan(folder.to_owned(), tx))?
             .map_err(anyhow::Error::msg)
+    }
+
+    pub fn path_status(&self, paths: Vec<PathBuf>) -> Result<Vec<PathStatus>> {
+        self.ask(|tx| Control::PathStatus(paths, tx))
     }
 
     /// A sender for control requests (used by the HTTP API).
@@ -784,6 +840,42 @@ impl EngineThread {
                 };
                 let _ = reply.send(r);
             }
+            Control::PathStatus(paths, reply) => {
+                let _ = reply.send(paths.into_iter().map(|p| self.path_status(p)).collect());
+            }
+        }
+    }
+
+    fn path_status(&self, path: PathBuf) -> PathStatus {
+        let roots: Vec<&Path> = self
+            .folders
+            .iter()
+            .map(|f| f.config.path.as_path())
+            .collect();
+        let Some((i, rel)) = locate(&roots, &path) else {
+            return PathStatus {
+                path,
+                folder: None,
+                state: "unknown".into(),
+                reason: None,
+            };
+        };
+        let f = &self.folders[i];
+        let (state, reason) = match &f.engine {
+            None => ("error".into(), f.error.clone()),
+            Some(e) => match e.path_state(&rel) {
+                // Paused folders keep their last state on disk, but nothing moves.
+                Ok(PathState::Syncing) if e.is_paused() => ("paused".into(), None),
+                Ok(PathState::Blocked(why)) => ("blocked".into(), Some(why)),
+                Ok(s) => (s.as_str().into(), None),
+                Err(err) => ("error".into(), Some(err.to_string())),
+            },
+        };
+        PathStatus {
+            path,
+            folder: Some(f.config.id.clone()),
+            state,
+            reason,
         }
     }
 
@@ -851,5 +943,32 @@ impl EngineThread {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn locate_finds_the_innermost_folder() {
+        let outer = Path::new("/home/me/Sync");
+        let inner = Path::new("/home/me/Sync/Photos");
+        let roots = [outer, inner];
+        assert_eq!(
+            locate(&roots, Path::new("/home/me/Sync")),
+            Some((0, String::new()))
+        );
+        assert_eq!(
+            locate(&roots, Path::new("/home/me/Sync/a/b.txt")),
+            Some((0, "a/b.txt".into()))
+        );
+        assert_eq!(
+            locate(&roots, Path::new("/home/me/Sync/Photos/x.jpg")),
+            Some((1, "x.jpg".into()))
+        );
+        assert_eq!(locate(&roots, Path::new("/home/me/Synced/x")), None);
+        assert_eq!(locate(&roots, Path::new("/home/me/Sync/../x")), None);
+        assert_eq!(locate(&roots, Path::new("/elsewhere")), None);
     }
 }

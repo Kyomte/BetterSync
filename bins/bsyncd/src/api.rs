@@ -170,6 +170,24 @@ impl StatusDto {
     }
 }
 
+/// Badge state of absolute paths (stretch goal S1).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PathStatusRequest {
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PathStatusDto {
+    pub path: String,
+    /// The synced folder holding it, if any.
+    pub folder: Option<String>,
+    /// "synced", "syncing", "conflict", "blocked", "ignored", "unknown",
+    /// "paused" or "error".
+    pub state: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairRequest {
     pub id: String,
@@ -380,6 +398,24 @@ async fn rescan(State(state): State<ApiState>, UrlPath(id): UrlPath<String>) -> 
     ok(format!("rescanned {id}"))
 }
 
+async fn path_status(
+    State(state): State<ApiState>,
+    Json(req): Json<PathStatusRequest>,
+) -> ApiResult<Vec<PathStatusDto>> {
+    let paths = req.paths.iter().map(PathBuf::from).collect();
+    let out = ask(&state, move |tx| Control::PathStatus(paths, tx)).await?;
+    Ok(Json(
+        out.into_iter()
+            .map(|p| PathStatusDto {
+                path: p.path.to_string_lossy().into_owned(),
+                folder: p.folder,
+                state: p.state,
+                reason: p.reason,
+            })
+            .collect(),
+    ))
+}
+
 async fn bandwidth(
     State(state): State<ApiState>,
     Json(req): Json<BandwidthRequest>,
@@ -441,6 +477,7 @@ fn router(state: ApiState) -> Router {
         .route("/api/folders/{id}/resume", post(resume))
         .route("/api/folders/{id}/rescan", post(rescan))
         .route("/api/bandwidth", post(bandwidth))
+        .route("/api/path-status", post(path_status))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth))
         .merge(crate::ui::router())
         .with_state(state)

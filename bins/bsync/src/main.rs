@@ -10,7 +10,10 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use bsync_core::DeviceId;
 use bsyncd::Config;
-use bsyncd::api::{BandwidthRequest, DeviceRequest, FolderRequest, OkDto, PairRequest, StatusDto};
+use bsyncd::api::{
+    BandwidthRequest, DeviceRequest, FolderRequest, OkDto, PairRequest, PathStatusDto,
+    PathStatusRequest, StatusDto,
+};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -69,6 +72,14 @@ enum Command {
     Rescan { folder: String },
     /// List conflict copies.
     Conflicts,
+    /// Show the sync state of files or folders (what Explorer/Finder badges show).
+    PathStatus {
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+        /// Print the raw JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show or change bandwidth settings.
     Bandwidth {
         /// Treat the network as metered: auto (ask the OS), yes or no.
@@ -408,6 +419,24 @@ fn main() -> Result<()> {
                     b.max_download_kbps = req.max_download_kbps.unwrap_or(b.max_download_kbps);
                     println!("{:?}", c.bandwidth);
                     c.save(&dir)?;
+                }
+            }
+        }
+        Command::PathStatus { paths, json } => {
+            let paths = paths
+                .iter()
+                .map(|p| std::path::absolute(p).map(|p| p.to_string_lossy().into_owned()))
+                .collect::<std::io::Result<Vec<_>>>()?;
+            let out: Vec<PathStatusDto> =
+                daemon(&dir)?.post("/api/path-status", &PathStatusRequest { paths })?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else {
+                for p in &out {
+                    match &p.reason {
+                        Some(r) => println!("{}\t{}\t({r})", p.state, p.path),
+                        None => println!("{}\t{}", p.state, p.path),
+                    }
                 }
             }
         }
