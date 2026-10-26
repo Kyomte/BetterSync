@@ -17,6 +17,7 @@ bsync-proto = { path = "crates/proto" }
 bsync-net = { path = "crates/net" }
 bsync-engine = { path = "crates/engine" }
 bsync-sim = { path = "crates/sim" }
+bsync-ffi = { path = "crates/ffi" }
 
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }

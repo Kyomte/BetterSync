@@ -22,3 +22,4 @@ with date, OS version and result. CI only covers compile + automated tests.
 | M11 | `bsync bandwidth --up 500` limits upload to ~500 kB/s (watch Task Manager / Activity Monitor) | not yet run | not yet run |
 | S5 | With Tailscale running on both and no `--addr` configured, PC ↔ Mac connect over the tailnet from different networks | not yet run | not yet run |
 | S4 | Raspberry Pi 4/5 (64-bit OS): systemd service runs, auto-accepts a folder shared from the PC, keeps syncing across reboots | n/a (Pi) | n/a (Pi) |
+| S3 | Android: install the CI debug APK, pair with the PC via the status page, sync a folder under the app's files directory; keeps syncing with the screen off (notification visible) | n/a (Android) | n/a (Android) |

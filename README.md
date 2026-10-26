@@ -46,3 +46,17 @@ Windows and macOS numbers (including `bsync-tray`) are still to be recorded
 — see docs/manual-checks.md.
 
 Targets Windows and macOS (Linux works too). Written in Rust.
+
+## Android
+
+`android/` is an Android app that runs the daemon in a foreground service
+and shows the status page. CI builds a debug APK (workflow "Android",
+artifact `bettersync-debug-apk`). To build locally you need the Android SDK
+and NDK:
+
+```sh
+rustup target add aarch64-linux-android x86_64-linux-android
+cargo install cargo-ndk
+cargo ndk -t arm64-v8a -t x86_64 -o android/app/src/main/jniLibs build --release -p bsync-ffi
+gradle -p android assembleDebug
+```
