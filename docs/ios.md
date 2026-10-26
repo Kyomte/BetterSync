@@ -27,7 +27,10 @@ BetterSync (or after one of those background runs), not instantly.
    (`bsync folder share <folder> <phone ID>`). It appears automatically in
    **Files › On My iPhone › BetterSync › <folder>**, no setup on the phone.
 3. Files edited in that folder (from Files or any app that opens files in
-   place) sync back.
+   place) sync back. The app notices changes by rescanning every 15 s while
+   it runs and whenever it comes back to the foreground (iOS's file change
+   notifications need a file descriptor per file, which large folders
+   would exhaust).
 
 The first time, iOS asks to allow finding devices on the local network;
 LAN discovery needs that permission.

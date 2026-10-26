@@ -32,7 +32,13 @@ DESK=$(mktemp -d)
 DESK_ID=$("$BIN/bsync" --config-dir "$DESK/cfg" id)
 "$BIN/bsyncd" --config-dir "$DESK/cfg" > "$DESK/bsyncd.log" 2>&1 &
 DAEMON=$!
-trap 'kill $DAEMON 2>/dev/null || true; cat "$DESK/bsyncd.log" | tail -40' EXIT
+on_exit() {
+    kill $DAEMON 2>/dev/null || true
+    echo "--- desktop log"; tail -40 "$DESK/bsyncd.log" || true
+    echo "--- phone log"; tail -60 "$CFG"/logs/*.log 2>/dev/null || true
+    echo "--- phone status"; phone "$PHONE_API/api/status" | python3 -m json.tool || true
+}
+trap on_exit EXIT
 for _ in $(seq 30); do [ -f "$DESK/cfg/api.addr" ] && break; sleep 1; done
 
 "$BIN/bsync" --config-dir "$DESK/cfg" pair "$PHONE_ID" --name phone
@@ -55,4 +61,3 @@ echo "desktop -> phone ok"
 echo "from the phone" > "$DATA/Documents/shared/reply.txt"
 wait_for "$DESK/share/reply.txt" "from the phone"
 echo "phone -> desktop ok"
-phone "$PHONE_API/api/status" | python3 -m json.tool | head -40

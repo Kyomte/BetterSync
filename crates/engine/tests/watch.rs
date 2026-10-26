@@ -41,6 +41,7 @@ impl Harness {
             WatchConfig {
                 debounce: DEBOUNCE,
                 full_rescan: Duration::from_secs(3600),
+                ..WatchConfig::default()
             },
             move |e| {
                 let _ = tx.lock().unwrap().send(e);
@@ -190,4 +191,30 @@ fn editor_safe_saves_end_as_a_plain_edit() {
     });
     let v3 = h.index.get("doc.txt").unwrap().unwrap().record.version;
     assert!(v3.dominates(&v1), "history continues across the save");
+}
+
+/// Without OS notifications (iOS) only the periodic rescans report, and
+/// nothing else does.
+#[test]
+fn without_notifications_only_rescans_report() {
+    let root = tempfile::tempdir().unwrap();
+    let (tx, events) = mpsc::channel();
+    let tx = std::sync::Mutex::new(tx);
+    let _watcher = FolderWatcher::new(
+        root.path(),
+        WatchConfig {
+            debounce: DEBOUNCE,
+            full_rescan: Duration::from_millis(700),
+            notifications: false,
+        },
+        move |e| {
+            let _ = tx.lock().unwrap().send(e);
+        },
+    )
+    .unwrap();
+    std::fs::write(root.path().join("a.txt"), b"a").unwrap();
+    for _ in 0..2 {
+        let e = events.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(e, WatchEvent::FullRescan);
+    }
 }

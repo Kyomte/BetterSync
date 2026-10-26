@@ -13,9 +13,15 @@
 use std::ffi::{CStr, CString, c_char};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
+use bsync_fs::WatchConfig;
 use bsyncd::Daemon;
+
+/// How often the iOS app rescans its folders (it cannot use the OS's
+/// change notifications; see [`Options::rescan_every`]).
+const IOS_RESCAN: Duration = Duration::from_secs(15);
 
 /// The running daemon (one per process).
 static DAEMON: Mutex<Option<Daemon>> = Mutex::new(None);
@@ -30,6 +36,9 @@ pub struct Options {
     /// [`discovered`] (iOS: raw multicast needs a special entitlement,
     /// Bonjour through the system does not).
     pub app_discovery: bool,
+    /// Find changes by rescanning this often instead of through OS
+    /// notifications (iOS: see [`bsync_fs::WatchConfig::notifications`]).
+    pub rescan_every: Option<Duration>,
 }
 
 /// Start the daemon with `config_dir` (created if needed). Returns the
@@ -56,9 +65,46 @@ pub fn start_with(config_dir: &Path, options: &Options) -> Result<String, String
             cfg.local_discovery = false;
         }
         cfg.save(config_dir).map_err(|e| format!("{e:#}"))?;
-        *slot = Some(Daemon::start(config_dir).map_err(|e| format!("{e:#}"))?);
+        init_logging(config_dir);
+        let watch = match options.rescan_every {
+            Some(every) => WatchConfig {
+                full_rescan: every,
+                notifications: false,
+                ..WatchConfig::default()
+            },
+            None => WatchConfig::default(),
+        };
+        *slot = Some(Daemon::start_with(config_dir, watch).map_err(|e| format!("{e:#}"))?);
     }
     status_page_url(config_dir)
+}
+
+/// Logs go to `<config dir>/logs` (daily files, 3 kept): an app has no
+/// terminal. Does nothing if the host already set up `tracing`.
+fn init_logging(config_dir: &Path) {
+    static GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
+    if GUARD.get().is_some() {
+        return;
+    }
+    let Ok(file) = tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("bsyncd")
+        .filename_suffix("log")
+        .max_log_files(3)
+        .build(config_dir.join("logs"))
+    else {
+        return;
+    };
+    let (writer, guard) = tracing_appender::non_blocking(file);
+    let installed = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(writer)
+        .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
+        .try_init()
+        .is_ok();
+    if installed {
+        let _ = GUARD.set(guard);
+    }
 }
 
 /// iOS may move the app's container on an update, which changes every
@@ -105,6 +151,8 @@ pub fn network_changed() {
         && let Some(d) = slot.as_ref()
     {
         d.network_changed();
+        // Other apps may have changed files meanwhile.
+        d.rescan_all();
     }
 }
 
@@ -195,6 +243,7 @@ pub unsafe extern "C" fn bsync_start_mobile(
         let options = Options {
             folders_root: Some(root),
             app_discovery: app_discovery != 0,
+            rescan_every: cfg!(target_os = "ios").then_some(IOS_RESCAN),
         };
         start_with(&dir, &options)
     });
@@ -364,6 +413,7 @@ mod tests {
         );
         assert!(!saved.local_discovery);
         assert!(root.is_dir());
+        assert!(cfg.join("logs").is_dir());
 
         // A container move between launches carries the folder along.
         bsync_stop();

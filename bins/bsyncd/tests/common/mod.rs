@@ -53,6 +53,7 @@ impl Dev {
             WatchConfig {
                 debounce: Duration::from_millis(200),
                 full_rescan: Duration::from_secs(3600),
+                ..WatchConfig::default()
             },
         )
         .unwrap()

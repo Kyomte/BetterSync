@@ -412,6 +412,18 @@ impl Daemon {
         self.dialer.retry_now();
     }
 
+    /// Ask every folder to rescan, without waiting (e.g. a phone app came
+    /// back to the foreground: other apps may have changed files).
+    pub fn rescan_all(&self) {
+        let Ok(config) = Config::load(&self.config_dir) else {
+            return;
+        };
+        for f in config.folders {
+            let (tx, _rx) = mpsc::channel();
+            let _ = self.events.send(Event::Control(Control::Rescan(f.id, tx)));
+        }
+    }
+
     pub fn path_status(&self, paths: Vec<PathBuf>) -> Result<Vec<PathStatus>> {
         self.ask(|tx| Control::PathStatus(paths, tx))
     }
