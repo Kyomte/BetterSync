@@ -365,6 +365,7 @@ impl SyncEngine {
         if removed > 0 {
             tracing::info!(folder = %self.config.folder_id, removed, "pruned old versions");
         }
+        self.folder.prune_bases()?;
         Ok(())
     }
 

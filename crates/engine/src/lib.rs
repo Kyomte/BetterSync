@@ -3,6 +3,7 @@
 
 mod error;
 pub mod folder;
+pub mod merge;
 pub mod scan;
 pub mod sync;
 

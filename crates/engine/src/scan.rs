@@ -77,6 +77,9 @@ pub fn new_version(
         modified_by: device,
         hash: Hash::default(),
         chunks: Vec::new(),
+        ancestors: previous
+            .map(FileRecord::ancestry_for_child)
+            .unwrap_or_default(),
     }
 }
 
@@ -177,6 +180,13 @@ fn update_entry(
             r.hash = chunked.hash;
             r.chunks = chunked.chunks;
             index.put(&r, Some(stat_of(&meta)))?;
+            if r.size <= crate::merge::MERGE_MAX
+                && let Ok(content) = ctx.fs.read(&rel_to_path(ctx.root, &entry.path))
+                && Hash::of(&content) == r.hash
+            {
+                // A possible base for merging later concurrent edits.
+                crate::merge::Bases::new(ctx.fs, ctx.root).store(&r.hash, &content)?;
+            }
             Ok(true)
         }
         FileKind::Symlink => Ok(false),

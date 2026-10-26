@@ -14,6 +14,7 @@ bsync-fs.workspace = true
 bsync-proto.workspace = true
 bsync-net.workspace = true
 blake3.workspace = true
+diffy.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 

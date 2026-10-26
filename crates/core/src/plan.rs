@@ -194,6 +194,7 @@ mod tests {
             modified_by: d(by),
             hash: Hash::of(content),
             chunks: Vec::new(),
+            ancestors: Vec::new(),
         }
     }
 

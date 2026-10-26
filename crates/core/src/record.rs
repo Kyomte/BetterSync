@@ -34,6 +34,10 @@ pub struct FileRecord {
     /// BLAKE3 of the whole content; default for directories and tombstones.
     pub hash: Hash,
     pub chunks: Vec<ChunkRef>,
+    /// Content hashes of the versions this one descends from, nearest
+    /// first (at most [`MAX_ANCESTORS`]): lets devices find a common
+    /// ancestor for merging concurrent edits of text files.
+    pub ancestors: Vec<Hash>,
 }
 
 impl FileRecord {
@@ -69,6 +73,22 @@ impl FileRecord {
     }
 }
 
+/// How many ancestor hashes a record carries.
+pub const MAX_ANCESTORS: usize = 8;
+
+impl FileRecord {
+    /// Ancestry for a new version edited from `self`: `self` first.
+    pub fn ancestry_for_child(&self) -> Vec<Hash> {
+        if !self.is_live_file() {
+            return Vec::new();
+        }
+        std::iter::once(self.hash)
+            .chain(self.ancestors.iter().copied())
+            .take(MAX_ANCESTORS)
+            .collect()
+    }
+}
+
 /// The parent of a `/`-separated relative path, `None` at the root.
 pub fn parent_of(path: &str) -> Option<&str> {
     path.rfind('/').map(|i| &path[..i])
@@ -101,6 +121,7 @@ mod tests {
                     len: 3,
                 },
             ],
+            ancestors: Vec::new(),
         };
         assert_eq!(r.parent(), Some("x"));
         let offsets: Vec<u64> = r.chunk_offsets().map(|(o, _)| o).collect();

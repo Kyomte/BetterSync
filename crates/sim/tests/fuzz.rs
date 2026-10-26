@@ -30,6 +30,29 @@ fn regression_seeds() {
     }
 }
 
+/// Text files edited line by line: concurrent edits get merged, and no
+/// line a user wrote may be lost.
+#[test]
+fn random_text_runs() {
+    let runs = env("BSYNC_FUZZ_RUNS", 200);
+    let start = env("BSYNC_FUZZ_SEED", 0);
+    let config = FuzzConfig {
+        text: true,
+        ..FuzzConfig::default()
+    };
+    let mut failures = Vec::new();
+    for seed in start..start + runs {
+        if let Err(e) = run(seed, config) {
+            eprintln!("{e}\n");
+            failures.push(seed);
+            if failures.len() >= 5 {
+                break;
+            }
+        }
+    }
+    assert!(failures.is_empty(), "failing text seeds: {failures:?}");
+}
+
 #[test]
 fn random_runs() {
     let runs = env("BSYNC_FUZZ_RUNS", 200);
