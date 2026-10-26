@@ -1,0 +1,28 @@
+# BetterSync daemon as a system service, e.g. on a home server or a
+# Raspberry Pi. Install (as root):
+#   useradd --system --create-home --home-dir /var/lib/bettersync bettersync
+#   install -m 755 bsyncd bsync /usr/local/bin/
+#   install -m 644 bsyncd.service /etc/systemd/system/
+#   systemctl enable --now bsyncd
+# Administer it as that user:
+#   sudo -u bettersync bsync --config-dir /var/lib/bettersync/config status
+
+[Unit]
+Description=BetterSync peer-to-peer folder sync
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=bettersync
+Group=bettersync
+ExecStart=/usr/local/bin/bsyncd --config-dir /var/lib/bettersync/config
+Restart=on-failure
+RestartSec=5
+# The daemon writes only its config dir and the synced folders.
+NoNewPrivileges=yes
+ProtectSystem=full
+PrivateTmp=yes
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target

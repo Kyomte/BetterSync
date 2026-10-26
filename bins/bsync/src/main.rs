@@ -179,17 +179,39 @@ fn daemon(dir: &Path) -> Result<Client> {
     Client::connect(dir).context("the BetterSync daemon (bsyncd) is not running")
 }
 
+/// `println!` into a buffer.
+macro_rules! outln {
+    ($out:expr, $($arg:tt)*) => {{
+        use std::fmt::Write as _;
+        let _ = writeln!($out, $($arg)*);
+    }};
+}
+
+/// Write to stdout, quietly stopping if the reader went away (e.g.
+/// `bsync status | head`).
+fn emit(text: &str) {
+    use std::io::Write as _;
+    let _ = std::io::stdout().lock().write_all(text.as_bytes());
+}
+
 fn print_status(s: &StatusDto) {
-    println!("This device: {} ({})", s.device_id, s.device_name);
+    let mut out = String::new();
+    outln!(out, "This device: {} ({})", s.device_id, s.device_name);
     if let Some(l) = &s.listen {
-        println!("Listening on {l}");
+        outln!(out, "Listening on {l}");
     }
     if s.metered {
-        println!("Network: metered (large files wait for an unmetered network)");
+        outln!(
+            out,
+            "Network: metered (large files wait for an unmetered network)"
+        );
     }
-    println!();
+    out.push('\n');
     if s.folders.is_empty() {
-        println!("No folders. Add one with `bsync folder add <id> <path> --share <device>`.");
+        outln!(
+            out,
+            "No folders. Add one with `bsync folder add <id> <path> --share <device>`."
+        );
     }
     for f in &s.folders {
         let progress = match f.state.as_str() {
@@ -200,25 +222,30 @@ fn print_status(s: &StatusDto) {
             "error" => format!("error: {}", f.error.clone().unwrap_or_default()),
             other => other.to_owned(),
         };
-        println!("Folder {}  {}", f.id, f.path);
-        println!(
+        outln!(out, "Folder {}  {}", f.id, f.path);
+        outln!(
+            out,
             "  {progress}; {} item(s), shared with {} device(s)",
             f.local_entries,
             f.shared_with.len()
         );
         for b in &f.blocked {
-            println!("  ! {}: {}", b.path, b.reason);
+            outln!(out, "  ! {}: {}", b.path, b.reason);
         }
         if !f.conflicts.is_empty() {
-            println!(
+            outln!(
+                out,
                 "  {} conflict copy(ies), see `bsync conflicts`",
                 f.conflicts.len()
             );
         }
     }
-    println!();
+    out.push('\n');
     if s.peers.is_empty() {
-        println!("No paired devices. Pair with `bsync pair <device-id>` on both devices.");
+        outln!(
+            out,
+            "No paired devices. Pair with `bsync pair <device-id>` on both devices."
+        );
     }
     for p in &s.peers {
         let name = if p.name.is_empty() {
@@ -227,11 +254,12 @@ fn print_status(s: &StatusDto) {
             &p.name
         };
         match (p.connected, &p.address) {
-            (true, Some(a)) => println!("Device {name}  {}  connected via {a}", p.id),
-            (true, None) => println!("Device {name}  {}  connected", p.id),
-            (false, _) => println!("Device {name}  {}  not connected", p.id),
+            (true, Some(a)) => outln!(out, "Device {name}  {}  connected via {a}", p.id),
+            (true, None) => outln!(out, "Device {name}  {}  connected", p.id),
+            (false, _) => outln!(out, "Device {name}  {}  not connected", p.id),
         }
     }
+    emit(&out);
 }
 
 fn main() -> Result<()> {

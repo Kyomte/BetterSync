@@ -25,6 +25,8 @@ pub enum NetEvent {
         peer: DeviceId,
         name: String,
         addr: SocketAddr,
+        /// Folders the peer says it syncs with us.
+        folders: Vec<FolderId>,
     },
     Disconnected {
         peer: DeviceId,
@@ -344,7 +346,7 @@ impl QuicNet {
                     protocol_version,
                     device_id,
                     device_name,
-                    ..
+                    folders,
                 } = msg
                 else {
                     return Err(NetError::Protocol("expected Hello".into()));
@@ -362,6 +364,7 @@ impl QuicNet {
                     peer,
                     name: device_name,
                     addr: conn.remote_address(),
+                    folders,
                 });
                 continue;
             }

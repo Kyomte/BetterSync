@@ -200,7 +200,7 @@ Legend: 🐧 = fully verifiable on Linux / in a cloud session. 💻 = needs a ma
 - **S1 — Explorer / Finder integration:** status badges + on-demand files via Windows Cloud Files API (`cfapi`) and macOS File Provider extension.
 - **S2 — CRDT merge for text files** (e.g. `automerge` / `yrs`) instead of conflict copies.
 - **S3 — Mobile client** (Android first; iOS background limits are severe).
-- **S4 — Always-on peer mode** for a home server / Raspberry Pi (headless daemon only).
+- **S4 — Always-on peer mode** for a home server / Raspberry Pi (headless daemon only). ✅ `always_on.auto_accept_folders` creates folders paired devices offer under `always_on.folders_root`; configurable versions retention; systemd unit; CI builds aarch64-linux. See docs/always-on.md.
 - **S5 — Tailscale auto-discovery** via `tailscale status --json`. ✅ The daemon reads the online tailnet machines every 5 min and the dialer tries them (last) for paired devices it cannot otherwise reach; the pinned TLS handshake tells which machine is which device, and the match is remembered.
 
 ---

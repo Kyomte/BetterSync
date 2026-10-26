@@ -5,6 +5,7 @@
 //! arrives (network, file change, control request) or an engine deadline
 //! passes — there is no polling loop.
 
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -13,7 +14,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
-use bsync_core::{ChunkParams, DeviceId};
+use bsync_core::{ChunkParams, DeviceId, FolderId};
 use bsync_engine::{EngineConfig, EngineStatus, Folder, SyncEngine, SystemClock};
 use bsync_fs::{FolderWatcher, StdFs, WatchConfig, WatchEvent};
 use bsync_index::Index;
@@ -116,6 +117,8 @@ struct EngineThread {
     dialer: Arc<Dialer>,
     /// What the OS last said (Auto mode).
     os_metered: bool,
+    /// Folder offers already accepted, waiting for the reload.
+    accepted: BTreeSet<(DeviceId, String)>,
 }
 
 /// A running daemon.
@@ -272,6 +275,7 @@ impl Daemon {
             peers_seen: Default::default(),
             dialer: Arc::clone(&dialer),
             os_metered: false,
+            accepted: BTreeSet::new(),
         };
         thread_state.open_folders(watch);
         let thread = std::thread::Builder::new()
@@ -431,9 +435,13 @@ impl EngineThread {
             CHUNKS,
             index,
         );
+        let mut engine_config = EngineConfig::new(cfg.folder_id(), cfg.shared_with());
+        engine_config.versions_max_age =
+            Duration::from_secs(self.config.versions.max_days * 86_400);
+        engine_config.versions_max_bytes = self.config.versions.max_gb * 1024 * 1024 * 1024;
         let mut engine = SyncEngine::new(
             folder,
-            EngineConfig::new(cfg.folder_id(), cfg.shared_with()),
+            engine_config,
             self.net.transport(),
             Arc::new(SystemClock),
             random_u64,
@@ -467,6 +475,7 @@ impl EngineThread {
                 peer,
                 name: String::new(),
                 addr: SocketAddr::from(([0, 0, 0, 0], 0)),
+                folders: Vec::new(),
             });
         }
         self.apply_bandwidth();
@@ -554,8 +563,16 @@ impl EngineThread {
 
     fn on_net(&mut self, event: NetEvent) {
         match event {
-            NetEvent::Connected { peer, name, addr } => {
+            NetEvent::Connected {
+                peer,
+                name,
+                addr,
+                folders,
+            } => {
                 tracing::info!(%peer, %name, %addr, "connected");
+                for f in &folders {
+                    self.offered(peer, f);
+                }
                 if !name.is_empty() {
                     self.peers_seen.insert(peer, (name, addr));
                 }
@@ -579,6 +596,11 @@ impl EngineThread {
                 let Some(folder) = msg.folder().cloned() else {
                     return;
                 };
+                if !self.folders.iter().any(|f| f.config.id == folder.0) {
+                    // A folder added on the peer after it connected.
+                    self.offered(peer, &folder);
+                    return;
+                }
                 for f in &mut self.folders {
                     if f.config.id != folder.0 {
                         continue;
@@ -591,6 +613,56 @@ impl EngineThread {
                     return;
                 }
             }
+        }
+    }
+
+    /// `peer` syncs `folder` with us. An always-on peer accepts it: creates
+    /// the folder under its root (or shares an existing one with the peer)
+    /// and reloads.
+    fn offered(&mut self, peer: DeviceId, folder: &FolderId) {
+        let existing = self.config.folders.iter().find(|f| f.id == folder.0);
+        if existing.is_some_and(|f| f.shared_with().contains(&peer)) {
+            return;
+        }
+        if !self.accepted.insert((peer, folder.0.clone())) {
+            return; // already being set up
+        }
+        if !self.config.always_on.auto_accept_folders {
+            if existing.is_none() {
+                tracing::info!(%peer, folder = %folder, "peer offers a folder that is not set up here");
+            }
+            return;
+        }
+        let path = if existing.is_some() {
+            None
+        } else {
+            match self.config.always_on.path_for(&folder.0) {
+                Some(p) => Some(p),
+                None => {
+                    tracing::warn!(folder = %folder, "cannot accept folder: no always_on.folders_root, or unusable folder ID");
+                    return;
+                }
+            }
+        };
+        let result = (|| -> Result<()> {
+            let mut cfg = Config::load(&self.config_dir)?;
+            match &path {
+                Some(p) => {
+                    std::fs::create_dir_all(p)?;
+                    cfg.add_folder(&folder.0, p.clone(), &[peer])?;
+                }
+                None => cfg.share_folder(&folder.0, peer)?,
+            }
+            cfg.save(&self.config_dir)
+        })();
+        match result {
+            Ok(()) => {
+                tracing::info!(%peer, folder = %folder, "accepted folder");
+                // Picked up on the next loop iteration.
+                let (tx, _rx) = mpsc::channel();
+                let _ = self.events_tx.send(Event::Control(Control::Reload(tx)));
+            }
+            Err(e) => tracing::error!(folder = %folder, "accepting folder failed: {e:#}"),
         }
     }
 

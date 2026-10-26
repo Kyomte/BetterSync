@@ -81,6 +81,63 @@ pub struct Config {
     /// The port other devices listen on over Tailscale.
     #[serde(default = "default_port")]
     pub tailscale_port: u16,
+    /// How long replaced and deleted content is kept in `.bsync/versions`.
+    #[serde(default)]
+    pub versions: Versions,
+    /// Settings for an always-on peer (home server, Raspberry Pi).
+    #[serde(default)]
+    pub always_on: AlwaysOn,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Versions {
+    pub max_days: u64,
+    pub max_gb: u64,
+}
+
+impl Default for Versions {
+    fn default() -> Self {
+        Self {
+            max_days: 30,
+            max_gb: 10,
+        }
+    }
+}
+
+/// An always-on peer accepts folders that paired devices offer, so every
+/// folder has a copy on a machine that is always reachable.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AlwaysOn {
+    /// Create (or share) any folder a paired device offers.
+    pub auto_accept_folders: bool,
+    /// Where auto-accepted folders go: `<root>/<folder id>`.
+    pub folders_root: Option<PathBuf>,
+}
+
+impl AlwaysOn {
+    /// The local path for an offered folder, if it should be accepted.
+    pub fn path_for(&self, folder_id: &str) -> Option<PathBuf> {
+        if !self.auto_accept_folders {
+            return None;
+        }
+        let root = self.folders_root.as_ref()?;
+        let safe: String = folder_id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        if safe.is_empty() || safe.chars().all(|c| c == '.') {
+            return None;
+        }
+        Some(root.join(safe))
+    }
 }
 
 fn default_port() -> u16 {
@@ -158,6 +215,8 @@ impl Default for Config {
             bandwidth: Bandwidth::default(),
             tailscale_discovery: true,
             tailscale_port: DEFAULT_PORT,
+            versions: Versions::default(),
+            always_on: AlwaysOn::default(),
         }
     }
 }
@@ -321,6 +380,25 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn always_on_paths_are_contained() {
+        let a = AlwaysOn {
+            auto_accept_folders: true,
+            folders_root: Some(PathBuf::from("/srv/bsync")),
+        };
+        assert_eq!(
+            a.path_for("photos"),
+            Some(PathBuf::from("/srv/bsync/photos"))
+        );
+        assert_eq!(
+            a.path_for("../etc"),
+            Some(PathBuf::from("/srv/bsync/.._etc"))
+        );
+        assert_eq!(a.path_for(".."), None);
+        assert_eq!(a.path_for(""), None);
+        assert_eq!(AlwaysOn::default().path_for("photos"), None);
+    }
 
     #[test]
     fn round_trip_and_pairing_edits() {
