@@ -68,23 +68,20 @@ mod tests {
     }
 
     /// Needs the Cloud Files filter driver (cldflt), present on Windows 10
-    /// 1709+ desktops; if registration is refused (some server images), the
-    /// rest of the test cannot run and says so.
+    /// 1709+; set `BSYNC_SKIP_CLOUDFILES=1` where it is unavailable.
     #[cfg(windows)]
     #[test]
     fn badges_follow_set_in_sync() {
+        if std::env::var_os("BSYNC_SKIP_CLOUDFILES").is_some() {
+            eprintln!("skipped: BSYNC_SKIP_CLOUDFILES is set");
+            return;
+        }
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join("root");
         std::fs::create_dir(&root).expect("mkdir");
         let file = root.join("a.txt");
         std::fs::write(&file, b"content").expect("write");
-        let sync_root = match SyncRoot::register(&root, "test-folder") {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("cannot register a sync root here: {e}");
-                return;
-            }
-        };
+        let sync_root = SyncRoot::register(&root, "test-folder").expect("register sync root");
         assert!(sync_root.set_in_sync(&file, true).expect("mark in sync"));
         assert!(!sync_root.set_in_sync(&file, true).expect("no-op"));
         assert!(
