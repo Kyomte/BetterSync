@@ -23,3 +23,6 @@ with date, OS version and result. CI only covers compile + automated tests.
 | S5 | With Tailscale running on both and no `--addr` configured, PC ↔ Mac connect over the tailnet from different networks | not yet run | not yet run |
 | S4 | Raspberry Pi 4/5 (64-bit OS): systemd service runs, auto-accepts a folder shared from the PC, keeps syncing across reboots | n/a (Pi) | n/a (Pi) |
 | S3 | Android: install the CI debug APK, pair with the PC via the status page, sync a folder under the app's files directory; keeps syncing with the screen off (notification visible) | n/a (Android) | n/a (Android) |
+| S1 | `"explorer_badges": true` in config.json, restart: synced files show a green tick, a file being edited/synced shows the arrows, the folder shows arrows while a conflict copy exists | not yet run | n/a |
+| S1 | With badges on: editing in Word/VS Code, "Free up space" is refused or does nothing (file stays on disk), removing the folder from config removes the registration | not yet run | n/a |
+| S1 | `bsync path-status <file>` prints synced / syncing / conflict / blocked | not yet run | not yet run |

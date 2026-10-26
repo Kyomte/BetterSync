@@ -183,8 +183,9 @@ pub struct SyncEngine {
     totals: SyncStats,
     temp_counter: u64,
     /// Paths whose [`PathState`] may have changed since the last
-    /// [`SyncEngine::take_touched`], besides index changes.
-    touched: BTreeSet<String>,
+    /// [`SyncEngine::take_touched`], besides index changes; `None` unless
+    /// someone asks.
+    touched: Option<BTreeSet<String>>,
     /// Index changes up to here were reported by `take_touched`.
     touched_seq: u64,
 }
@@ -232,7 +233,7 @@ impl SyncEngine {
             blocked: Vec::new(),
             totals: SyncStats::default(),
             temp_counter: 0,
-            touched: BTreeSet::new(),
+            touched: None,
             touched_seq: 0,
         })
     }
@@ -369,9 +370,9 @@ impl SyncEngine {
 
     /// Record paths whose [`PathState`] may have changed since the last
     /// call (everything, the first time). Their parent directories may
-    /// have changed too.
+    /// have changed too. Tracking starts with the first call.
     pub fn take_touched(&mut self) -> Result<BTreeSet<String>> {
-        let mut out = std::mem::take(&mut self.touched);
+        let mut out = self.touched.replace(BTreeSet::new()).unwrap_or_default();
         loop {
             let batch = self.folder.index().since(self.touched_seq, INDEX_BATCH)?;
             let Some(last) = batch.last() else { break };
@@ -804,9 +805,10 @@ impl SyncEngine {
             self.folder.take_ignore_changed();
         }
         let mut wanted: Vec<(Hash, String)> = Vec::new();
-        self.touched.extend(self.pending.iter().cloned());
-        self.touched
-            .extend(self.blocked.iter().map(|(p, _)| p.clone()));
+        if let Some(t) = self.touched.as_mut() {
+            t.extend(self.pending.iter().cloned());
+            t.extend(self.blocked.iter().map(|(p, _)| p.clone()));
+        }
         loop {
             let mut actions = Vec::new();
             for path in &self.pending {
@@ -882,8 +884,9 @@ impl SyncEngine {
                 }
             }
             self.pending = still_pending;
-            self.touched
-                .extend(self.blocked.iter().map(|(p, _)| p.clone()));
+            if let Some(t) = self.touched.as_mut() {
+                t.extend(self.blocked.iter().map(|(p, _)| p.clone()));
+            }
             if !progress {
                 break;
             }

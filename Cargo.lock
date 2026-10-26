@@ -268,6 +268,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bsync-cloudfiles"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "thiserror 2.0.21",
+ "windows",
+]
+
+[[package]]
 name = "bsync-core"
 version = "0.1.0"
 dependencies = [
@@ -396,6 +405,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "bsync-cloudfiles",
  "bsync-core",
  "bsync-engine",
  "bsync-fs",

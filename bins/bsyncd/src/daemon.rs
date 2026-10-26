@@ -20,6 +20,7 @@ use bsync_fs::{FolderWatcher, StdFs, WatchConfig, WatchEvent};
 use bsync_index::Index;
 use bsync_net::{Dialer, Discovery, Identity, NetEvent, PairedSet, QuicNet};
 
+use crate::badges::Badges;
 use crate::config::{Config, FolderConfig, MeteredMode};
 
 /// A request to the engine thread, answered on `reply`.
@@ -156,6 +157,7 @@ struct FolderRuntime {
     engine: Option<SyncEngine>,
     error: Option<String>,
     _watcher: Option<FolderWatcher>,
+    badges: Option<Badges>,
 }
 
 struct EngineThread {
@@ -445,6 +447,11 @@ impl EngineThread {
     fn open_folder(&self, cfg: FolderConfig, watch: WatchConfig) -> FolderRuntime {
         match self.try_open_folder(&cfg, watch) {
             Ok((engine, watcher)) => FolderRuntime {
+                badges: self
+                    .config
+                    .explorer_badges
+                    .then(|| Badges::start(&cfg.path, &cfg.id))
+                    .flatten(),
                 config: cfg,
                 engine: Some(engine),
                 error: None,
@@ -457,6 +464,7 @@ impl EngineThread {
                     engine: None,
                     error: Some(format!("{e:#}")),
                     _watcher: None,
+                    badges: None,
                 }
             }
         }
@@ -537,11 +545,13 @@ impl EngineThread {
         self.apply_bandwidth();
         // Work found by the startup scans (no event may come for a while).
         self.tick_all();
+        let mut badges_waiting = self.update_badges();
         loop {
             let deadline = self
                 .folders
                 .iter()
                 .filter_map(|f| f.engine.as_ref()?.next_deadline())
+                .chain(badges_waiting.then(SystemTime::now))
                 .min();
             let event = match deadline {
                 None => events.recv().map_err(|_| RecvTimeoutError::Disconnected),
@@ -578,7 +588,19 @@ impl EngineThread {
                 }
             }
             self.tick_all();
+            badges_waiting = self.update_badges();
         }
+    }
+
+    /// True if some badges are still waiting for an update.
+    fn update_badges(&mut self) -> bool {
+        let mut waiting = false;
+        for f in &mut self.folders {
+            if let (Some(b), Some(e)) = (f.badges.as_mut(), f.engine.as_mut()) {
+                waiting |= b.update(e);
+            }
+        }
+        waiting
     }
 
     /// The effective metered state: configuration first, then the OS.
@@ -928,6 +950,12 @@ impl EngineThread {
                     }
                 };
                 self.folders.push(f);
+            }
+            // Folders no longer synced lose their Explorer registration.
+            for f in previous.iter_mut() {
+                if f.badges.take().is_some() {
+                    Badges::remove(&f.config.path);
+                }
             }
             drop(previous);
             let peers = self.net.connected_peers();

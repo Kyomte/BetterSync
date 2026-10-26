@@ -87,6 +87,10 @@ pub struct Config {
     /// Settings for an always-on peer (home server, Raspberry Pi).
     #[serde(default)]
     pub always_on: AlwaysOn,
+    /// Windows: show sync badges in Explorer (Cloud Files API). Read at
+    /// startup.
+    #[serde(default)]
+    pub explorer_badges: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -217,6 +221,7 @@ impl Default for Config {
             tailscale_port: DEFAULT_PORT,
             versions: Versions::default(),
             always_on: AlwaysOn::default(),
+            explorer_badges: false,
         }
     }
 }

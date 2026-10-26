@@ -18,6 +18,7 @@ bsync-net = { path = "crates/net" }
 bsync-engine = { path = "crates/engine" }
 bsync-sim = { path = "crates/sim" }
 bsync-ffi = { path = "crates/ffi" }
+bsync-cloudfiles = { path = "crates/cloudfiles" }
 
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
